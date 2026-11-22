@@ -70,8 +70,17 @@ login() {
     --data-urlencode "next=/" "$BASE/_gate/login"
 }
 
-# chat <session-user> <message> [model-override] -> prints the assistant text
+# chat <session-user> <message> [model-override] -> prints the assistant text.
+# Retries for up to ~60 s while the gateway reports it is still starting.
 chat() {
+  local out i
+  for i in $(seq 1 12); do
+    out=$(chat_once "$@")
+    case "$out" in *"Please retry"*|*"is starting"*) echo "(gateway still starting, retrying)" >&2; sleep 5 ;; *) break ;; esac
+  done
+  printf '%s\n' "$out"
+}
+chat_once() {
   local hdr=()
   [ -n "${3:-}" ] && hdr=(-H "x-openclaw-model: $3")
   curl -s -b "$JAR" --max-time 600 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \

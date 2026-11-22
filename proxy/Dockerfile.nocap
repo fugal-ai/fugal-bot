@@ -1,0 +1,30 @@
+# The same proxy, for hosts whose filesystem cannot store file capabilities
+# (the official caddy image sets cap_net_bind_service on /usr/bin/caddy, and a
+# layer carrying that attribute cannot be unpacked there, e.g. under gVisor).
+# Caddy 2.11.9 from the official release archive, checked against its published
+# SHA-512. Base: the same pinned python:3.13-alpine image the gate uses.
+FROM python@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e
+ARG TARGETARCH=amd64
+RUN python3 -I - "$TARGETARCH" <<'PY'
+import hashlib, io, sys, tarfile, urllib.request
+arch = sys.argv[1]
+sums = {
+    "amd64": "0e85544340290a16ce4bfb76fe7d65e9de1bf3a6e67f5ccfff30b30d27ea4c73e078077b7bf3e58ae60b6b12e44327705287059c775bca5782e8ee85ea7edd75",
+    "arm64": "9e5e76d7888542924de2c25353ae87c5f77e2a22c5b1198633cae13688922282e05383d142599205c88d8d80eee5e967d291214d7abce4835329a191b20dd6e0",
+}
+url = f"https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_linux_{arch}.tar.gz"
+data = urllib.request.urlopen(url, timeout=120).read()
+if hashlib.sha512(data).hexdigest() != sums[arch]:
+    sys.exit("caddy archive checksum mismatch")
+with tarfile.open(fileobj=io.BytesIO(data)) as t:
+    f = t.extractfile("caddy")
+    open("/usr/bin/caddy", "wb").write(f.read())
+import os
+os.chmod("/usr/bin/caddy", 0o755)
+PY
+RUN caddy version
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/fugal-bot-proxy
+COPY --chmod=0755 tunnel-url.sh /usr/local/bin/fugal-bot-tunnel-url
+ENV XDG_DATA_HOME=/data XDG_CONFIG_HOME=/tmp/caddy-config
+USER 1001:1001
+ENTRYPOINT ["/usr/local/bin/fugal-bot-proxy"]

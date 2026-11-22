@@ -24,6 +24,7 @@
 # version in Cathedral rooms, ignores `!reset` inside a merged anchor.
 services:
   volume-init:
+    image: python@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e
     volumes: !override
       - ${DATA_DIR:?set DATA_DIR to an existing directory}:/v
 
@@ -56,6 +57,10 @@ services:
   proxy:
     network_mode: host
     networks: !reset null
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile.nocap   # the official caddy image cannot be unpacked here
+      network: host
     ports: !reset []
     environment:
       PROXY_LISTEN_HOST: 127.0.0.1
@@ -68,6 +73,9 @@ services:
     volumes: !override
       - ${DATA_DIR:?set DATA_DIR}/proxy:/data
 
+  tunnel-guard:
+    image: python@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e
+
   tunnel:
     network_mode: host
     networks: !reset null
@@ -76,6 +84,10 @@ services:
   tunnel-url:
     network_mode: host
     networks: !reset null
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile.nocap   # the official caddy image cannot be unpacked here
+      network: host
     environment:
       TUNNEL_METRICS: 127.0.0.1:2000
     volumes: !override

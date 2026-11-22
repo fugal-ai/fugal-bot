@@ -46,6 +46,10 @@ services:
     depends_on: [netns]
   proxy:
     <<: *shared
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile.nocap
+      network: default   # test host: never build with the host network
     environment:
       # Test only: also listen on the shared namespace's own interface so the
       # port published by "netns" reaches it. In a real room it stays 127.0.0.1.
@@ -59,6 +63,10 @@ services:
     <<: *shared
   tunnel-url:
     <<: *shared
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile.nocap
+      network: default
     volumes: !override
       - botdata:/v
   brain:

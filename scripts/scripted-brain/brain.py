@@ -9,6 +9,7 @@ the bot; it runs only under scripts/smoke.compose.yaml.
 Script, counted by tool results since the last user message:
   0 -> exec:    run one shell command that creates ~/workspace/smoke-file.txt
   1 -> browser: open https://example.com in the bot's (visible) browser
+       (directly, or via dispatch_action when OpenClaw hides it behind Tool Search)
   2 -> final text summarising both tool results.
 """
 
@@ -42,11 +43,16 @@ def plan(req):
     last_user = max((i for i, m in enumerate(msgs) if m.get("role") == "user"), default=-1)
     results = [m for m in msgs[last_user + 1:] if m.get("role") == "tool"]
     step = len(results)
-    log(f"step={step} tools_offered={len(tools)} has_exec={'exec' in tools} has_browser={'browser' in tools}")
+    log(f"step={step} tools_offered={sorted(t for t in tools if t)}")
     if step == 0 and "exec" in tools:
         return ("tool", "exec", {"command": STAMP_CMD})
-    if step <= 1 and "browser" in tools and not any("example.com" in text_of(m.get("content")) for m in results):
-        return ("tool", "browser", {"action": "open", "targetUrl": "https://example.com"})
+    browse = {"action": "open", "targetUrl": "https://example.com"}
+    if step <= 1 and not any("example.com" in text_of(m.get("content")) for m in results):
+        if "browser" in tools:
+            return ("tool", "browser", browse)
+        # OpenClaw may hide most tools behind Tool Search; dispatch by name.
+        if "dispatch_action" in tools:
+            return ("tool", "dispatch_action", {"id": "browser", "args": browse})
     summary = " | ".join(text_of(m.get("content"))[:300].replace("\n", " ") for m in results)
     return ("text", f"SCRIPTED-BRAIN DONE. Tool results: {summary}", None)
 
