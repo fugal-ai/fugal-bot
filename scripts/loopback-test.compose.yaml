@@ -29,6 +29,9 @@ services:
       - botdata:/v
   bot:
     <<: *shared
+    build:
+      context: ./bot
+      network: default   # test host: never build with the host network
     depends_on: [netns]
     environment:
       SCRIPTED_BRAIN_URL: http://127.0.0.1:11500/v1

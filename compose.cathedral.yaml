@@ -33,6 +33,8 @@ services:
     <<: *hostnet
     build:
       context: ./bot
+      # apt-get in the build needs the internet; only the host network has it
+      # there. (Other images need no network while building.)
       network: host
     extra_hosts: !reset []
     environment:
@@ -46,18 +48,12 @@ services:
 
   gate:
     <<: *hostnet
-    build:
-      context: ./gate
-      network: host
     environment:
       GATE_LISTEN_HOST: 127.0.0.1
       GATE_LISTEN_PORT: "9000"
 
   proxy:
     <<: *hostnet
-    build:
-      context: ./proxy
-      network: host
     ports: !reset []
     environment:
       PROXY_LISTEN_HOST: 127.0.0.1
