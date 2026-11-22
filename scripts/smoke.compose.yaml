@@ -1,0 +1,22 @@
+# TEST ONLY overlay used by scripts/smoke.sh: adds the scripted tool-calling
+# "brain" on its own internal network (never on the proxy's "front" network).
+services:
+  brain:
+    build:
+      context: ./scripts/scripted-brain
+    image: privatebot-scripted-brain:test
+    networks: [smokenet]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.25
+  bot:
+    environment:
+      SCRIPTED_BRAIN_URL: http://brain:11500/v1
+    networks: [front, smokenet]
+    depends_on: [brain]
+
+networks:
+  smokenet:
+    internal: true

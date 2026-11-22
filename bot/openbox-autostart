@@ -1,0 +1,4 @@
+#!/bin/sh
+# The bot's desktop: a dark background and one terminal in the workspace.
+xsetroot -solid '#1e2430' 2>/dev/null || true
+(cd "$HOME/workspace" && xterm -geometry 110x30+20+20 -fa 'DejaVu Sans Mono' -fs 10 -bg '#10141c' -fg '#d0d6e0' -T 'bot terminal' &) 

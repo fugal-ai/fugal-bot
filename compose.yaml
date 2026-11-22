@@ -1,0 +1,141 @@
+# One bot = this compose application. One published port (the proxy), one
+# persistent volume (botdata), no host bind mounts, no Docker socket, no host
+# network, nothing privileged. Start: `cp .env.example .env`, edit, then
+# `docker compose up -d --build`.
+name: ${BOT_NAME:-privatebot}
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  # Lays out the one volume on first start: home/ for the bot, proxy/ for TLS state.
+  volume-init:
+    image: caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /v/home /v/proxy && chown 1000:1000 /v/home && chmod 700 /v/home && chown 1001:1001 /v/proxy && chmod 700 /v/proxy"]
+    user: "0:0"
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - botdata:/v
+    restart: "no"
+
+  bot:
+    <<: *hardening
+    build:
+      context: ./bot
+    image: privatebot-bot:stage0
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    environment:
+      MODEL_BASE_URL: ${MODEL_BASE_URL:?set MODEL_BASE_URL in .env}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:?set MODEL_NAME in .env}
+      MODEL_CONTEXT_WINDOW: ${MODEL_CONTEXT_WINDOW:-32768}
+      MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-4096}
+      MODEL_REASONING: ${MODEL_REASONING:-false}
+      MODEL_SUPPORTS_TOOLS: ${MODEL_SUPPORTS_TOOLS:-true}
+      ENABLE_OPENAI_API: ${ENABLE_OPENAI_API:-true}
+      SCRIPTED_BRAIN_URL: ${SCRIPTED_BRAIN_URL:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:-}
+      EXEC_MODE: ${EXEC_MODE:-full}
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-}
+      PROXY_PORT: ${PORT:-8080}
+      FRONT_SUBNET: 10.213.57.0/28
+      DESKTOP_GEOMETRY: ${DESKTOP_GEOMETRY:-1280x800}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - type: volume
+        source: botdata
+        target: /home/node
+        volume:
+          subpath: home
+    networks: [front]
+    # Lets the bot reach a model server on this host (the stage-0 Ollama test).
+    # Remove on a server that runs no local model (see SECURITY-NOTES.md).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    shm_size: "1gb"
+    mem_limit: ${BOT_MEM_LIMIT:-2560m}
+    cpus: ${BOT_CPUS:-2.0}
+    pids_limit: 1024
+
+  gate:
+    <<: *hardening
+    build:
+      context: ./gate
+    image: privatebot-gate:stage0
+    environment:
+      ACCESS_PASSWORD: ${ACCESS_PASSWORD:?set ACCESS_PASSWORD in .env}
+      BIND_ADDRESS: ${BIND_ADDRESS:-127.0.0.1}
+      SESSION_HOURS: ${SESSION_HOURS:-168}
+    networks: [gatenet]
+    read_only: true
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python3", "-I", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9000/_gate/health',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  proxy:
+    <<: *hardening
+    build:
+      context: ./proxy
+    image: privatebot-proxy:stage0
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      gate:
+        condition: service_healthy
+    environment:
+      ACCESS_PASSWORD: ${ACCESS_PASSWORD:?set ACCESS_PASSWORD in .env}
+      BIND_ADDRESS: ${BIND_ADDRESS:-127.0.0.1}
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      ALLOW_PUBLIC_HTTP: ${ALLOW_PUBLIC_HTTP:-}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8080}:8443"
+    volumes:
+      - type: volume
+        source: botdata
+        target: /data
+        volume:
+          subpath: proxy
+    networks: [front, gatenet]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/_proxy/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+networks:
+  # bot <-> proxy. Fixed subnet: the gateway trusts identity headers only from
+  # this subnet (and never from its own address), i.e. only from the proxy.
+  front:
+    ipam:
+      config:
+        - subnet: 10.213.57.0/28
+  # proxy <-> gate. No outbound access at all.
+  gatenet:
+    internal: true
+
+volumes:
+  botdata:
