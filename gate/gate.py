@@ -133,7 +133,7 @@ META = "\n".join(_meta)
 PAGE = (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width,initial-scale=1">'
-    "<title>Fugal Bot</title><style>" + STYLE + "</style></head><body><main>"
+    "<title>Fugal Bot</title><style>" + STYLE.replace("{", "{{").replace("}", "}}") + "</style></head><body><main>"
     "<h1>Fugal Bot</h1>"
     '<p class="lead">Your own AI assistant with its own computer: a browser and a shell you can watch.</p>'
     + META.replace("{", "{{").replace("}", "}}") +
