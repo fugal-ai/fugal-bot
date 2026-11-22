@@ -1,3 +1,11 @@
 .env
 *.log
 smoke-output/
+.env.*
+!.env.example
+data/
+*-data/
+tmp/
+scratch/
+*.tgz
+TUNNEL_URL.txt
