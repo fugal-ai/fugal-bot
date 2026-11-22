@@ -80,7 +80,7 @@ services:
     <<: *hardening
     build:
       context: ./gate
-    image: fugal-bot-gate:stage0
+    image: ${GATE_IMAGE:-fugal-bot-gate:stage0}
     environment:
       ACCESS_PASSWORD: ${ACCESS_PASSWORD:?set ACCESS_PASSWORD in .env}
       BIND_ADDRESS: ${BIND_ADDRESS:-127.0.0.1}
@@ -104,7 +104,7 @@ services:
     <<: *hardening
     build:
       context: ./proxy
-    image: fugal-bot-proxy:stage0
+    image: ${PROXY_IMAGE:-fugal-bot-proxy:stage0}
     depends_on:
       volume-init:
         condition: service_completed_successfully
@@ -181,7 +181,7 @@ services:
     profiles: [tunnel]
     build:
       context: ./proxy   # same image as the proxy (it carries the script)
-    image: fugal-bot-proxy:stage0
+    image: ${PROXY_IMAGE:-fugal-bot-proxy:stage0}
     user: "0:0"
     depends_on: [tunnel]
     entrypoint: ["/bin/sh", "/usr/local/bin/fugal-bot-tunnel-url"]

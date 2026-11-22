@@ -13,6 +13,21 @@
 # multi-arch index digest (amd64 manifest sha256:ccb0d04f...). MIT licence.
 ARG OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw@sha256:65e229536a2698f0ab211c8a3d1c5c8e2685d19379d153e95f93ff76f22779cf
 FROM ${OPENCLAW_IMAGE}
+# The upstream image carries its own revision/created labels; replace them so
+# they describe this image. Pass both when publishing, e.g.
+#   --build-arg GIT_REVISION=$(git rev-parse HEAD) --build-arg BUILD_DATE=$(date -u +%FT%TZ)
+ARG GIT_REVISION=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="fugal-bot" \
+      org.opencontainers.image.revision="${GIT_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.description="Fugal Bot: an OpenClaw agent with its own Linux desktop, shell and Chromium (OpenClaw v2026.11.6 + desktop layers)" \
+      org.opencontainers.image.source="https://github.com/fugal-ai/fugal-bot" \
+      org.opencontainers.image.url="https://github.com/fugal-ai/fugal-bot" \
+      org.opencontainers.image.documentation="https://github.com/fugal-ai/fugal-bot" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.base.name="ghcr.io/openclaw/openclaw:2026.11.6" \
+      org.opencontainers.image.base.digest="sha256:65e229536a2698f0ab211c8a3d1c5c8e2685d19379d153e95f93ff76f22779cf"
 
 USER root
 

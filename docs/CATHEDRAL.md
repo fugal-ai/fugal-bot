@@ -70,12 +70,28 @@ Open the printed `https://<random>.trycloudflare.com/` and log in with the
 access password. The URL is also in `/workspace/fugal-bot-data/TUNNEL_URL.txt`
 and in `python3 cathedral.py logs tunnel-url`.
 
-**Cold start (estimated, not yet measured in a room):** the first `up` in a
-new room pulls the OpenClaw image (about 1 GB) and installs the desktop and
-Chromium packages, roughly 4 to 8 minutes. After that, the bot itself takes
-about 30 to 60 seconds to become healthy. To skip the build, publish the bot
-image once and set `BOT_IMAGE=<registry>/fugal-bot@sha256:...` in the env file
-(nothing is published yet).
+**Cold start:** building in a room works but is slow. In the first real room
+the bot image built with host networking, and exporting the built image alone
+took about 12 minutes. Pulling published images is much faster. Set, in the env
+file, digest-pinned published images:
+
+```
+BOT_IMAGE=<registry>/fugal-bot@sha256:...
+GATE_IMAGE=<registry>/fugal-bot-gate@sha256:...
+PROXY_IMAGE=<registry>/fugal-bot-proxy@sha256:...   # the proxy/Dockerfile.nocap build
+```
+
+and in the room (working directory `/workspace/app`):
+
+```
+docker compose --profile tunnel pull
+docker compose --profile tunnel up -d --no-build --wait
+```
+
+`pull` fetches the published images even though the services also have a
+build section; `--no-build` guarantees nothing is built. Without
+`--no-build`, compose still builds nothing as long as the images are present.
+Nothing is published yet.
 
 ## 3. Keep it alive
 

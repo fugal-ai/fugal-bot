@@ -4,6 +4,10 @@
 # Caddy 2.11.9 from the official release archive, checked against its published
 # SHA-512. Base: the same pinned python:3.13-alpine image the gate uses.
 FROM python@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e
+LABEL org.opencontainers.image.title="fugal-bot-proxy" \
+      org.opencontainers.image.description="Fugal Bot reverse proxy: Caddy 2.11.9 from the checksummed release archive, no file capabilities (works under gVisor)" \
+      org.opencontainers.image.source="https://github.com/fugal-ai/fugal-bot" \
+      org.opencontainers.image.licenses="MIT"
 ARG TARGETARCH=amd64
 RUN python3 -I - "$TARGETARCH" <<'PY'
 import hashlib, io, sys, tarfile, urllib.request

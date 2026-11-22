@@ -112,8 +112,10 @@ wires them over `127.0.0.1`. Step-by-step: `docs/CATHEDRAL.md`.
 
 **First start takes a while**: building the bot image downloads the OpenClaw
 image (about 1 GB) and the desktop and Chromium packages, typically several
-minutes on a fresh machine; later starts reuse the image. Setting `BOT_IMAGE`
-to a published image skips the build (none is published yet).
+minutes on a fresh machine; later starts reuse the image. To skip building,
+set `BOT_IMAGE`, `GATE_IMAGE` and `PROXY_IMAGE` to published, digest-pinned
+images and run `docker compose pull` then `docker compose up -d --no-build`
+(none is published yet).
 
 ## Login page
 
