@@ -20,17 +20,16 @@
 # proxy's identity header from 127.0.0.1, so ANY process on the host network
 # (including the agent's own shell) could send it. See SECURITY-NOTES.md.
 
-x-hostnet: &hostnet
-  network_mode: host
-  networks: !reset []
-
+# Written out in every service (not as a YAML anchor): Compose 2.33, the
+# version in Cathedral rooms, ignores `!reset` inside a merged anchor.
 services:
   volume-init:
     volumes: !override
       - ${DATA_DIR:?set DATA_DIR to an existing directory}:/v
 
   bot:
-    <<: *hostnet
+    network_mode: host
+    networks: !reset null
     build:
       context: ./bot
       # apt-get in the build needs the internet; only the host network has it
@@ -48,13 +47,15 @@ services:
     mem_limit: ${BOT_MEM_LIMIT:-4g}
 
   gate:
-    <<: *hostnet
+    network_mode: host
+    networks: !reset null
     environment:
       GATE_LISTEN_HOST: 127.0.0.1
       GATE_LISTEN_PORT: "9000"
 
   proxy:
-    <<: *hostnet
+    network_mode: host
+    networks: !reset null
     ports: !reset []
     environment:
       PROXY_LISTEN_HOST: 127.0.0.1
@@ -68,11 +69,13 @@ services:
       - ${DATA_DIR:?set DATA_DIR}/proxy:/data
 
   tunnel:
-    <<: *hostnet
+    network_mode: host
+    networks: !reset null
     command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:2000", "--url", "http://127.0.0.1:${PORT:-8080}"]
 
   tunnel-url:
-    <<: *hostnet
+    network_mode: host
+    networks: !reset null
     environment:
       TUNNEL_METRICS: 127.0.0.1:2000
     volumes: !override
