@@ -15,7 +15,7 @@ const cfgPath = env.OPENCLAW_CONFIG_PATH || "/home/node/.openclaw/openclaw.json"
 function need(name) {
   const v = (env[name] || "").trim();
   if (!v) {
-    console.error(`[privatebot] ${name} is required (set it in .env)`);
+    console.error(`[fugal-bot] ${name} is required (set it in .env)`);
     process.exit(2);
   }
   return v;
@@ -47,7 +47,7 @@ if (fs.existsSync(cfgPath)) {
   } catch {
     const bak = `${cfgPath}.unparseable-${Date.now()}`;
     fs.copyFileSync(cfgPath, bak);
-    console.error(`[privatebot] existing config was not plain JSON; saved a copy to ${bak} and starting fresh`);
+    console.error(`[fugal-bot] existing config was not plain JSON; saved a copy to ${bak} and starting fresh`);
     current = {};
   }
 }
@@ -67,9 +67,10 @@ const managed = {
     mode: "local",
     port: 18789,
     bind: "lan",
-    // Only the password proxy may assert identity; it is the only other member
-    // of the compose "front" network (see compose.yaml).
-    trustedProxies: [need("FRONT_SUBNET")],
+    // Only the password proxy (fixed address on the compose "front" network)
+    // may assert identity. Not the subnet: Docker's gateway address on that
+    // network is where published-port clients appear from.
+    trustedProxies: [need("PROXY_IP")],
     auth: {
       mode: "trusted-proxy",
       trustedProxy: {
@@ -199,6 +200,6 @@ const tmp = `${cfgPath}.tmp-${process.pid}`;
 fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
 fs.renameSync(tmp, cfgPath);
 console.log(
-  `[privatebot] config rendered: model=${providerId}/${modelName} endpoint=${new URL(baseUrl).host} ` +
+  `[fugal-bot] config rendered: model=${providerId}/${modelName} endpoint=${new URL(baseUrl).host} ` +
     `telegram=${tgToken ? "on" : "off"} exec=${execMode}`,
 );

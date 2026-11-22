@@ -24,10 +24,12 @@ if [ -n "${PUBLIC_HOSTNAME:-}" ]; then
 		}
 	}"
   HSTS='Strict-Transport-Security "max-age=31536000"'
+  HTTPS_PORT=8443
 else
   SITE="http://:8443"
   TLS=""
   HSTS=""
+  HTTPS_PORT=8444   # unused; Caddy refuses http:// on its https_port
 fi
 
 cat > /tmp/Caddyfile <<CADDY
@@ -35,8 +37,14 @@ cat > /tmp/Caddyfile <<CADDY
 	admin off
 	persist_config off
 	http_port 8080
-	https_port 8443
+	https_port ${HTTPS_PORT}
 	auto_https disable_redirects
+	servers {
+		# The optional tunnel (compose profile "tunnel") is the only proxy in
+		# front of us; client IP comes from Cloudflare's header via it.
+		trusted_proxies static 10.213.58.10/32
+		client_ip_headers Cf-Connecting-Ip X-Forwarded-For
+	}
 }
 
 # Local-only health endpoint for the container healthcheck (both modes).
@@ -62,7 +70,9 @@ ${SITE} {
 		respond "ok" 200
 	}
 	handle /_gate/* {
-		reverse_proxy gate:9000
+		reverse_proxy gate:9000 {
+			header_up X-Gate-Client-IP {client_ip}
+		}
 	}
 
 	route {
@@ -71,8 +81,16 @@ ${SITE} {
 		request_header -X-Gate-User
 		forward_auth gate:9000 {
 			uri /_gate/check
+			header_up X-Gate-Client-IP {client_ip}
 			copy_headers X-Gate-User>X-Forwarded-User
 		}
+		# Same-origin check is done HERE (the browser's Origin must equal the
+		# address it is talking to), then the origin is normalised so the
+		# gateway accepts it whatever public name we are reached by (local,
+		# PUBLIC_HOSTNAME, or a random tunnel URL). Cross-site origins pass
+		# through unchanged and the gateway rejects them.
+		@sameorigin expression \`{http.request.header.Origin} == "https://" + {http.request.hostport} || {http.request.header.Origin} == "http://" + {http.request.hostport}\`
+		request_header @sameorigin Origin "https://bot.invalid"
 		# The bot's desktop (noVNC + websocket), watch and take over.
 		redir /desktop /desktop/ 308
 		handle_path /desktop/* {

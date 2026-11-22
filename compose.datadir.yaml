@@ -1,0 +1,15 @@
+# Optional overlay: keep ALL bot data in one host directory (DATA_DIR) instead
+# of a Docker-managed named volume (e.g. a sandbox host's persistent /workspace).
+# Enable it in .env:
+#   DATA_DIR=/workspace/fugal-bot-data
+#   COMPOSE_FILE=compose.yaml:compose.datadir.yaml
+# The directory must exist first (mkdir -p "$DATA_DIR"). Its layout is the same
+# as the named volume: home/ (the bot), proxy/ (TLS state), TUNNEL_URL.txt.
+volumes:
+  botdata:
+    name: ${BOT_NAME:-fugal-bot}_botdata_dir
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:?set DATA_DIR to an existing directory}

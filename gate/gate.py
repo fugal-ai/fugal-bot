@@ -34,7 +34,7 @@ if not LOOPBACK and len(PASSWORD) < 12:
 COOKIE = "pb_session"
 SESSION_SECONDS = int(os.environ.get("SESSION_HOURS", "168")) * 3600
 # Derived from the password: changing the password logs every session out.
-KEY = hashlib.sha256(b"private-bot-gate-v1\0" + PASSWORD.encode()).digest()
+KEY = hashlib.sha256(b"fugal-bot-gate-v1\0" + PASSWORD.encode()).digest()
 
 # Rate limits on failed logins.
 PER_IP_FAILS, PER_IP_WINDOW = 5, 15 * 60
@@ -113,10 +113,10 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("[gate] %s %s\n" % (self.client_ip(), fmt % args))
 
     def client_ip(self):
-        # Caddy overwrites X-Forwarded-For with the real peer (no trusted
-        # proxies configured upstream of it), and only Caddy can reach us.
-        xff = self.headers.get("X-Forwarded-For", "")
-        return xff.split(",")[0].strip() or self.client_address[0]
+        # Set by Caddy from its own view of the client ({client_ip}: the TCP
+        # peer, or Cloudflare's Cf-Connecting-Ip when it came via the tunnel).
+        # Only Caddy can reach this service, so the header is trustworthy.
+        return self.headers.get("X-Gate-Client-IP", "").strip() or self.client_address[0]
 
     def cookie_ok(self):
         for part in self.headers.get("Cookie", "").split(";"):

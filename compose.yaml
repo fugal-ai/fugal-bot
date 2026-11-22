@@ -2,7 +2,7 @@
 # persistent volume (botdata), no host bind mounts, no Docker socket, no host
 # network, nothing privileged. Start: `cp .env.example .env`, edit, then
 # `docker compose up -d --build`.
-name: ${BOT_NAME:-privatebot}
+name: ${BOT_NAME:-fugal-bot}
 
 x-hardening: &hardening
   security_opt:
@@ -32,7 +32,9 @@ services:
     <<: *hardening
     build:
       context: ./bot
-    image: privatebot-bot:stage0
+    image: fugal-bot-bot:stage0
+    hostname: bot
+    stop_grace_period: 45s
     depends_on:
       volume-init:
         condition: service_completed_successfully
@@ -51,7 +53,7 @@ services:
       EXEC_MODE: ${EXEC_MODE:-full}
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-}
       PROXY_PORT: ${PORT:-8080}
-      FRONT_SUBNET: 10.213.57.0/28
+      PROXY_IP: 10.213.57.10
       DESKTOP_GEOMETRY: ${DESKTOP_GEOMETRY:-1280x800}
       TZ: ${TZ:-UTC}
     volumes:
@@ -60,7 +62,9 @@ services:
         target: /home/node
         volume:
           subpath: home
-    networks: [front]
+    networks:
+      front:
+        ipv4_address: 10.213.57.11
     # Lets the bot reach a model server on this host (the stage-0 Ollama test).
     # Remove on a server that runs no local model (see SECURITY-NOTES.md).
     extra_hosts:
@@ -74,7 +78,7 @@ services:
     <<: *hardening
     build:
       context: ./gate
-    image: privatebot-gate:stage0
+    image: fugal-bot-gate:stage0
     environment:
       ACCESS_PASSWORD: ${ACCESS_PASSWORD:?set ACCESS_PASSWORD in .env}
       BIND_ADDRESS: ${BIND_ADDRESS:-127.0.0.1}
@@ -94,7 +98,7 @@ services:
     <<: *hardening
     build:
       context: ./proxy
-    image: privatebot-proxy:stage0
+    image: fugal-bot-proxy:stage0
     depends_on:
       volume-init:
         condition: service_completed_successfully
@@ -114,7 +118,12 @@ services:
         target: /data
         volume:
           subpath: proxy
-    networks: [front, gatenet]
+    networks:
+      front:
+        ipv4_address: 10.213.57.10
+      gatenet: {}
+      tunnelnet:
+        ipv4_address: 10.213.58.2
     read_only: true
     tmpfs: [/tmp]
     mem_limit: 128m
@@ -126,9 +135,57 @@ services:
       timeout: 5s
       retries: 3
 
+  # ---- optional: a public HTTPS URL without any inbound address --------------
+  # `docker compose --profile tunnel up -d` adds a Cloudflare quick tunnel (no
+  # account): cloudflared dials out to Cloudflare, which then serves
+  # https://<random>.trycloudflare.com -> proxy. The URL is printed in the logs
+  # (`docker compose logs tunnel-url`) and written to TUNNEL_URL.txt at the top
+  # of the data volume / DATA_DIR. ACCESS_PASSWORD (>= 12 chars) is mandatory.
+  tunnel-guard:
+    profiles: [tunnel]
+    image: caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    environment:
+      ACCESS_PASSWORD: ${ACCESS_PASSWORD:?set ACCESS_PASSWORD in .env}
+    entrypoint: ["/bin/sh", "-c", "if [ $${#ACCESS_PASSWORD} -ge 12 ]; then echo '[tunnel] password ok'; else echo '[tunnel] refusing: ACCESS_PASSWORD must be at least 12 characters when the tunnel is on' >&2; exit 1; fi"]
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+
+  tunnel:
+    <<: *hardening
+    profiles: [tunnel]
+    # cloudflared 2026.11.1, pinned by digest.
+    image: cloudflare/cloudflared@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d
+    command: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "--url", "http://proxy:8443"]
+    depends_on:
+      tunnel-guard:
+        condition: service_completed_successfully
+      proxy:
+        condition: service_healthy
+    networks:
+      tunnelnet:
+        ipv4_address: 10.213.58.10
+    mem_limit: 128m
+    cpus: 0.5
+
+  tunnel-url:
+    <<: *hardening
+    profiles: [tunnel]
+    image: fugal-bot-proxy:stage0   # built by the proxy service; has the script
+    user: "0:0"
+    depends_on: [tunnel]
+    entrypoint: ["/bin/sh", "/usr/local/bin/fugal-bot-tunnel-url"]
+    volumes:
+      - botdata:/v
+    networks: [tunnelnet]
+    read_only: true
+    mem_limit: 32m
+    cpus: 0.1
+
 networks:
-  # bot <-> proxy. Fixed subnet: the gateway trusts identity headers only from
-  # this subnet (and never from its own address), i.e. only from the proxy.
+  # bot <-> proxy. Fixed addresses: the gateway trusts identity headers only
+  # from the proxy's address (10.213.57.10), never from anything else.
   front:
     ipam:
       config:
@@ -136,6 +193,14 @@ networks:
   # proxy <-> gate. No outbound access at all.
   gatenet:
     internal: true
+  # proxy <-> optional tunnel (cloudflared needs outbound to Cloudflare).
+  tunnelnet:
+    ipam:
+      config:
+        - subnet: 10.213.58.0/28
 
 volumes:
+  # The ONE persistent volume. To keep it in a host directory instead (e.g.
+  # under /workspace on a sandbox host), set DATA_DIR and
+  # COMPOSE_FILE=compose.yaml:compose.datadir.yaml in .env.
   botdata:

@@ -14,6 +14,6 @@ export MODEL_API_KEY
 : "${DESKTOP_GEOMETRY:=1280x800}"
 export DESKTOP_GEOMETRY
 
-node /opt/privatebot/render-config.mjs
+node /opt/fugal-bot/render-config.mjs
 
-exec /usr/bin/supervisord -c /etc/privatebot/supervisord.conf
+exec /usr/bin/supervisord -c /etc/fugal-bot/supervisord.conf

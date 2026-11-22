@@ -30,12 +30,12 @@ RUN apt-get update \
 RUN rm -rf /app/skills/clawhub \
  && install -d -m 1777 /tmp/.X11-unix
 
-COPY --chown=root:root supervisord.conf /etc/privatebot/supervisord.conf
-COPY --chown=root:root entrypoint.sh render-config.mjs healthcheck.sh start-gateway.sh /opt/privatebot/
+COPY --chown=root:root supervisord.conf /etc/fugal-bot/supervisord.conf
+COPY --chown=root:root entrypoint.sh render-config.mjs healthcheck.sh start-gateway.sh /opt/fugal-bot/
 COPY --chown=root:root openbox-autostart /etc/xdg/openbox/autostart
 COPY --chown=root:root novnc-index.html /usr/share/novnc/index.html
-RUN chmod 0755 /opt/privatebot/*.sh /etc/xdg/openbox/autostart \
- && chmod 0644 /opt/privatebot/render-config.mjs /etc/privatebot/supervisord.conf /usr/share/novnc/index.html
+RUN chmod 0755 /opt/fugal-bot/*.sh /etc/xdg/openbox/autostart \
+ && chmod 0644 /opt/fugal-bot/render-config.mjs /etc/fugal-bot/supervisord.conf /usr/share/novnc/index.html
 
 # Everything the bot owns lives under /home/node, which is the ONE persistent
 # volume (mounted by compose). Nothing secret is baked into this image.
@@ -58,6 +58,6 @@ WORKDIR /home/node
 
 EXPOSE 18789 6080
 HEALTHCHECK --interval=20s --timeout=8s --start-period=90s --retries=5 \
-  CMD ["/opt/privatebot/healthcheck.sh"]
+  CMD ["/opt/fugal-bot/healthcheck.sh"]
 
-ENTRYPOINT ["tini", "-s", "--", "/opt/privatebot/entrypoint.sh"]
+ENTRYPOINT ["tini", "-s", "--", "/opt/fugal-bot/entrypoint.sh"]
