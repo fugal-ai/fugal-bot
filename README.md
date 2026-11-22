@@ -105,6 +105,16 @@ The stack runs under a plain `dockerd`, including Docker-in-Docker; it needs no
 systemd and no privileged containers. It is limited to about 2.8 GB of RAM
 (`BOT_MEM_LIMIT`, `BOT_CPUS`).
 
+**Hosts where containers get no NAT** (for example Cathedral confidential
+sandboxes, where Docker runs with `--bridge=none --iptables=false`): add
+`compose.cathedral.yaml`, which puts every service on the host network and
+wires them over `127.0.0.1`. Step-by-step: `docs/CATHEDRAL.md`.
+
+**First start takes a while**: building the bot image downloads the OpenClaw
+image (about 1 GB) and the desktop and Chromium packages, typically several
+minutes on a fresh machine; later starts reuse the image. Setting `BOT_IMAGE`
+to a published image skips the build (none is published yet).
+
 ## Telegram
 
 1. Create a bot with @BotFather and copy its token.

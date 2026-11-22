@@ -37,6 +37,7 @@ services:
       # there. (Other images need no network while building.)
       network: host
     extra_hosts: !reset []
+    hostname: !reset null   # not allowed together with the host network
     environment:
       GATEWAY_BIND: loopback
       NOVNC_LISTEN: 127.0.0.1:6080

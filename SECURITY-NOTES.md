@@ -70,6 +70,16 @@ one container, `bot`, as the unprivileged user `node` (uid 1000).
   network, no egress). The optional tunnel only talks to the proxy and
   Cloudflare.
 
+**All-host-network layout (`compose.cathedral.yaml`)**: on hosts without
+container NAT, every service shares the host's network namespace and listens
+on `127.0.0.1` only. The gateway then has to accept the proxy's identity
+header from `127.0.0.1` (`allowLoopback`), which means any process in that
+namespace, including the agent's own shell, could present it. In practice the
+agent already runs inside the gateway with the same rights; the change matters
+if anything else runs on that host. The rate limiter also trusts the
+`Cf-Connecting-Ip` header from loopback (the tunnel), so a local process could
+spread its attempts over fake addresses; the global limit still applies.
+
 Access control: every request through the proxy needs a valid session cookie
 from the password gate, including the desktop and its WebSocket, and the
 OpenAI-compatible API. Failed logins: 5 per client address per 15 minutes, 50
