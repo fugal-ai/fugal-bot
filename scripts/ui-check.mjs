@@ -2,7 +2,7 @@
 // Run by scripts/smoke.sh inside a throwaway container made from the bot image
 // (it already has Chromium and playwright-core), pointed at the proxy's
 // published port like a real browser:
-//   docker run --rm -i -e UI_BASE -e ACCESS_PASSWORD -e UI_MODEL ... --entrypoint node <bot image> - < scripts/ui-check.mjs
+//   docker run --rm -i -e UI_BASE -e ACCESS_PASSWORD -e UI_MESSAGE ... --entrypoint node <bot image> - < scripts/ui-check.mjs
 // Checks:
 //   1. websocket handshake with a SAME-origin Origin gets past the origin check
 //   2. the same with a CROSS-site Origin is refused for its origin
@@ -100,14 +100,16 @@ async function main() {
     }
     const send = async (text) => { await box.fill(text); await box.press("Enter"); };
     if (MODEL) { await send(`/model ${MODEL}`); await page.waitForTimeout(4000); }
-    const before = (await page.locator("body").innerText()).length;
+    // A finished assistant turn shows "Done in N seconds" under the reply.
+    const doneCount = (t) => (t.match(/Done in \d+/g) || []).length;
+    const before = doneCount(await page.locator("body").innerText());
     await send(MESSAGE);
     const t0 = Date.now();
     let ok = false, text = "";
     while (Date.now() - t0 < 240000) {
       await page.waitForTimeout(3000);
       text = await page.locator("body").innerText();
-      if (EXPECT ? text.includes(EXPECT) : text.length > before + MESSAGE.length + 20) { ok = true; break; }
+      if (doneCount(text) > before && (!EXPECT || text.includes(EXPECT))) { ok = true; break; }
     }
     if (ok) pass(`browser: message sent from the page got a reply${EXPECT ? ` containing "${EXPECT}"` : ""}`);
     else { fail("browser: no reply in the page within 240 s"); console.log(text.slice(-800)); }
