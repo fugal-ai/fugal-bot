@@ -42,7 +42,7 @@ cat > /tmp/Caddyfile <<CADDY
 	servers {
 		# The optional tunnel (compose profile "tunnel") is the only proxy in
 		# front of us; client IP comes from Cloudflare's header via it.
-		trusted_proxies static 10.213.58.10/32
+		trusted_proxies static ${TUNNEL_IP:-10.213.58.10}/32
 		client_ip_headers Cf-Connecting-Ip X-Forwarded-For
 	}
 }

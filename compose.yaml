@@ -53,7 +53,7 @@ services:
       EXEC_MODE: ${EXEC_MODE:-full}
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-}
       PROXY_PORT: ${PORT:-8080}
-      PROXY_IP: 10.213.57.10
+      PROXY_IP: ${FRONT_NET:-10.213.57}.10
       DESKTOP_GEOMETRY: ${DESKTOP_GEOMETRY:-1280x800}
       TZ: ${TZ:-UTC}
     volumes:
@@ -64,7 +64,7 @@ services:
           subpath: home
     networks:
       front:
-        ipv4_address: 10.213.57.11
+        ipv4_address: ${FRONT_NET:-10.213.57}.11
     # Lets the bot reach a model server on this host (the stage-0 Ollama test).
     # Remove on a server that runs no local model (see SECURITY-NOTES.md).
     extra_hosts:
@@ -110,6 +110,7 @@ services:
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-}
       ACME_EMAIL: ${ACME_EMAIL:-}
       ALLOW_PUBLIC_HTTP: ${ALLOW_PUBLIC_HTTP:-}
+      TUNNEL_IP: ${TUNNEL_NET:-10.213.58}.10
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8080}:8443"
     volumes:
@@ -120,10 +121,10 @@ services:
           subpath: proxy
     networks:
       front:
-        ipv4_address: 10.213.57.10
+        ipv4_address: ${FRONT_NET:-10.213.57}.10
       gatenet: {}
       tunnelnet:
-        ipv4_address: 10.213.58.2
+        ipv4_address: ${TUNNEL_NET:-10.213.58}.2
     read_only: true
     tmpfs: [/tmp]
     mem_limit: 128m
@@ -165,7 +166,7 @@ services:
         condition: service_healthy
     networks:
       tunnelnet:
-        ipv4_address: 10.213.58.10
+        ipv4_address: ${TUNNEL_NET:-10.213.58}.10
     mem_limit: 128m
     cpus: 0.5
 
@@ -185,11 +186,13 @@ services:
 
 networks:
   # bot <-> proxy. Fixed addresses: the gateway trusts identity headers only
-  # from the proxy's address (10.213.57.10), never from anything else.
+  # from the proxy's address (<FRONT_NET>.10), never from anything else.
+  # FRONT_NET / TUNNEL_NET (first three octets) can be changed in .env if these
+  # /28 ranges clash with another network on the host.
   front:
     ipam:
       config:
-        - subnet: 10.213.57.0/28
+        - subnet: ${FRONT_NET:-10.213.57}.0/28
   # proxy <-> gate. No outbound access at all.
   gatenet:
     internal: true
@@ -197,7 +200,7 @@ networks:
   tunnelnet:
     ipam:
       config:
-        - subnet: 10.213.58.0/28
+        - subnet: ${TUNNEL_NET:-10.213.58}.0/28
 
 volumes:
   # The ONE persistent volume. To keep it in a host directory instead (e.g.

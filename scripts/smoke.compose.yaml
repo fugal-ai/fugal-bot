@@ -16,7 +16,7 @@ services:
       SCRIPTED_BRAIN_URL: http://brain:11500/v1
     networks:
       front:
-        ipv4_address: 10.213.57.11
+        ipv4_address: ${FRONT_NET:-10.213.57}.11
       smokenet: {}
     depends_on: [brain]
 
