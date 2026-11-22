@@ -85,6 +85,10 @@ services:
       ACCESS_PASSWORD: ${ACCESS_PASSWORD:?set ACCESS_PASSWORD in .env}
       BIND_ADDRESS: ${BIND_ADDRESS:-127.0.0.1}
       SESSION_HOURS: ${SESSION_HOURS:-168}
+      # Optional lines on the login page (shown only when set; HTML-escaped).
+      HOST_LABEL: ${HOST_LABEL:-}
+      MODEL_LABEL: ${MODEL_LABEL:-}
+      REPO_URL: ${REPO_URL:-}
     networks: [gatenet]
     read_only: true
     mem_limit: 64m

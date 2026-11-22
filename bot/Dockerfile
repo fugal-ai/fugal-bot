@@ -57,7 +57,7 @@ USER node
 WORKDIR /home/node
 
 EXPOSE 18789 6080
-HEALTHCHECK --interval=20s --timeout=8s --start-period=90s --retries=5 \
+HEALTHCHECK --interval=10s --timeout=8s --start-period=300s --retries=6 \
   CMD ["/opt/fugal-bot/healthcheck.sh"]
 
 ENTRYPOINT ["tini", "-s", "--", "/opt/fugal-bot/entrypoint.sh"]

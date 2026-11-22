@@ -89,20 +89,60 @@ def safe_next(n):
     return n
 
 
-FORM = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Bot login</title><style>
-body{{font-family:system-ui,sans-serif;background:#10141c;color:#d0d6e0;display:flex;
-min-height:100vh;align-items:center;justify-content:center;margin:0}}
-form{{background:#1b2130;padding:2rem;border-radius:10px;min-width:280px}}
-input{{width:100%;box-sizing:border-box;padding:.6rem;margin:.6rem 0;border-radius:6px;border:1px solid #445}}
-button{{width:100%;padding:.6rem;border-radius:6px;border:0;background:#4b7bec;color:#fff;font-weight:600}}
-.err{{color:#ff8080}}</style></head><body>
-<form method="post" action="/_gate/login">
-<h2>Your bot</h2>{msg}
-<input type="password" name="password" placeholder="Access password" autofocus required>
-<input type="hidden" name="next" value="{next}">
-<button type="submit">Open</button></form></body></html>"""
+# ---- login page (presentation only) ------------------------------------------
+# Optional lines, shown only when set; every value is HTML-escaped. Nothing
+# about the configuration (model, endpoint, ...) is shown unless set here.
+def _opt(name):
+    return html.escape(os.environ.get(name, "").strip(), quote=True)
+
+
+HOST_LABEL, MODEL_LABEL, REPO_URL = _opt("HOST_LABEL"), _opt("MODEL_LABEL"), _opt("REPO_URL")
+if REPO_URL and not REPO_URL.lower().startswith(("https://", "http://")):
+    REPO_URL = ""
+
+STYLE = """
+:root{color-scheme:light dark;--bg:#f4f5f8;--card:#fff;--fg:#1d2330;--muted:#5b6475;--line:#d5d9e2;--accent:#3d63dd;--err:#c62828}
+@media (prefers-color-scheme:dark){:root{--bg:#10141c;--card:#1b2130;--fg:#e3e7ef;--muted:#98a2b3;--line:#3a4356;--accent:#6f8ff0;--err:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1.25rem;
+font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg);line-height:1.45}
+main{width:100%;max-width:24rem;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1.75rem}
+h1{font-size:1.5rem;margin:0 0 .35rem}
+p{margin:.25rem 0}
+.lead{color:var(--muted);margin-bottom:1rem}
+.meta{font-size:.875rem;color:var(--muted)}
+.meta a{color:var(--accent)}
+label{display:block;font-size:.875rem;margin-top:1rem}
+input{width:100%;font:inherit;padding:.7rem;margin:.35rem 0 .9rem;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+button{width:100%;font:inherit;padding:.7rem;border-radius:8px;border:0;background:var(--accent);color:#fff;font-weight:600;cursor:pointer}
+.err{color:var(--err);font-weight:600}
+"""
+CSP = "default-src 'none'; style-src 'sha256-{}'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'".format(
+    __import__("base64").b64encode(hashlib.sha256(STYLE.encode()).digest()).decode()
+)
+
+_meta = []
+if HOST_LABEL:
+    _meta.append(f'<p class="meta">Running on: {HOST_LABEL}</p>')
+if MODEL_LABEL:
+    _meta.append(f'<p class="meta">Model: {MODEL_LABEL}</p>')
+if REPO_URL:
+    _meta.append(f'<p class="meta"><a href="{REPO_URL}" rel="noopener noreferrer">Source code</a></p>')
+META = "\n".join(_meta)
+
+PAGE = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    "<title>Fugal Bot</title><style>" + STYLE + "</style></head><body><main>"
+    "<h1>Fugal Bot</h1>"
+    '<p class="lead">Your own AI assistant with its own computer: a browser and a shell you can watch.</p>'
+    + META.replace("{", "{{").replace("}", "}}") +
+    '<form method="post" action="/_gate/login">{msg}'
+    '<label for="pw">Access password</label>'
+    '<input id="pw" type="password" name="password" autocomplete="current-password" autofocus required>'
+    '<input type="hidden" name="next" value="{next}">'
+    '<button type="submit">Open</button></form></main></body></html>'
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -139,8 +179,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def form(self, code=200, msg="", nxt="/"):
-        body = FORM.format(msg=msg, next=html.escape(safe_next(nxt), quote=True)).encode()
+        body = PAGE.format(msg=msg, next=html.escape(safe_next(nxt), quote=True)).encode()
         self.send(code, body, [("Content-Type", "text/html; charset=utf-8"),
+                               ("Content-Security-Policy", CSP),
                                ("X-Frame-Options", "DENY")])
 
     def do_GET(self):

@@ -115,6 +115,14 @@ image (about 1 GB) and the desktop and Chromium packages, typically several
 minutes on a fresh machine; later starts reuse the image. Setting `BOT_IMAGE`
 to a published image skips the build (none is published yet).
 
+## Login page
+
+The login page shows the name, one sentence about the bot and the password
+field. Three optional lines appear only when set in `.env`: `HOST_LABEL`
+(where it runs), `MODEL_LABEL` (which model; nothing about the model is shown
+otherwise) and `REPO_URL` (a link to the source). Values are HTML-escaped; the
+page loads no external assets.
+
 ## Telegram
 
 1. Create a bot with @BotFather and copy its token.

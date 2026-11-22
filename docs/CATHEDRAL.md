@@ -3,7 +3,8 @@
 Cathedral "rooms" are short-lived sandboxes on AMD SEV-SNP machines. A room
 started from `docker:27-dind` already runs `dockerd`, has outbound internet,
 no inbound address and no SSH; commands go through Cathedral's HTTPS exec API.
-Three platform rules shape how the bot runs there:
+The room has Docker 27.5 with **Compose v2.33.0** (the overlay is validated
+against that version). Four platform rules shape how the bot runs there:
 
 1. **No NAT for containers.** Docker runs with `--bridge=none --iptables=false`
    under gVisor, so containers on a compose network have no internet and
@@ -14,6 +15,11 @@ Three platform rules shape how the bot runs there:
    images again. All bot data lives under `DATA_DIR` on `/workspace` (10 GiB).
 3. **A room lives at most 24 hours**, and the public tunnel URL changes with
    every new room.
+4. **Files cannot carry Linux file capabilities** (gVisor), so the official
+   `caddy` image, which sets one on its binary, cannot be unpacked. The
+   overlay builds the proxy from Caddy's release archive instead
+   (`proxy/Dockerfile.nocap`, SHA-512 checked) and uses the pinned
+   python-alpine image for the two one-shot helpers.
 
 The steps below use `cathedral.py`, a small command-line client for
 Cathedral's sandbox API (create, push-dir, push-env, up, logs, extend, down,
@@ -43,6 +49,9 @@ BOT_MEM_LIMIT=4g
 ```
 
 `COMPOSE_FILE` makes a plain `docker compose ...` in the room use the overlay.
+Compose resolves `COMPOSE_FILE` from `.env` against the **working directory**,
+not `--project-directory`, so run compose with the working directory set to
+the app directory (`/workspace/app`).
 Cathedral's operator can read this file, both when it is uploaded (plain API
 body) and on the host disk under `/workspace`. Use keys you can revoke.
 
@@ -107,11 +116,13 @@ off-site backup.
 - Every listener binds to `127.0.0.1` (proxy 8080, health 8081, gate 9000,
   gateway 18789 and OpenClaw's neighbouring ports, noVNC 6080, VNC 5900,
   cloudflared metrics 2000). Only the tunnel publishes anything.
+- Seen working in a real room so far: the overlay validates with Compose
+  2.33, the `Dockerfile.nocap` proxy image builds (archive checksum passed),
+  the python-alpine helper image pulls.
 - Tested locally: the loopback wiring (all services in one shared network
   namespace on an ordinary Docker host, `scripts/loopback-test.compose.yaml`),
   and the quick tunnel on the default layout.
-- Not tested in a real room: the build with `network: host` under gVisor,
+- Not yet confirmed in a real room: the bot image build under gVisor,
   `DATA_DIR` bind mounts on `/workspace` (Cathedral reports that they work for
   data and SQLite), the cold-start time, Chromium under gVisor, and
-  `up --wait` with Compose v2.33 (the stack has two one-shot services,
-  `volume-init` and `tunnel-guard`).
+  `up --wait` with the two one-shot services (`volume-init`, `tunnel-guard`).
