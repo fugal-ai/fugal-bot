@@ -11,6 +11,9 @@ HEALTH_PORT="${PROXY_HEALTH_PORT:-8081}"
 GATE="${GATE_UPSTREAM:-gate:9000}"
 GATEWAY="${GATEWAY_UPSTREAM:-bot:18789}"
 DESKTOP="${DESKTOP_UPSTREAM:-bot:6080}"
+# Verified same-origin browser Origins are rewritten to this value; the bot's
+# render-config.mjs always allows it. Same variable and default on both sides.
+UI_ORIGIN="${CONTROL_UI_ORIGIN:-https://bot.invalid}"
 BIND="${BIND_ADDRESS:-127.0.0.1}"
 case "$BIND" in 127.0.0.1|localhost|::1|"[::1]") LOOPBACK=1 ;; *) LOOPBACK=0 ;; esac
 if [ -z "${ACCESS_PASSWORD:-}" ]; then
@@ -102,7 +105,7 @@ ${SITE} {
 		# PUBLIC_HOSTNAME, or a random tunnel URL). Cross-site origins pass
 		# through unchanged and the gateway rejects them.
 		@sameorigin expression \`{http.request.header.Origin} == "https://" + {http.request.hostport} || {http.request.header.Origin} == "http://" + {http.request.hostport}\`
-		request_header @sameorigin Origin "https://bot.invalid"
+		request_header @sameorigin Origin "${UI_ORIGIN}"
 		# The bot's desktop (noVNC + websocket), watch and take over.
 		redir /desktop /desktop/ 308
 		handle_path /desktop/* {

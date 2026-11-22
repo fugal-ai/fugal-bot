@@ -6,6 +6,7 @@
 #
 #   DATA_DIR=/unused SMOKE_PROJECT=fugal-bot-looptest SMOKE_PORT=18095 \
 #   SMOKE_COMPOSE_FILES=compose.yaml:compose.cathedral.yaml:scripts/smoke.compose.yaml:scripts/loopback-test.compose.yaml \
+#   SMOKE_UI_NETWORK=fugal-bot-looptest_loopnet SMOKE_UI_BASE=http://netns:18095 \
 #   scripts/smoke.sh --fresh
 x-shared: &shared
   network_mode: "service:netns"

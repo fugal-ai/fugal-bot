@@ -154,6 +154,22 @@ win=$("${DC[@]}" exec -T bot sh -c 'DISPLAY=:1 xdotool search --name "Example Do
 echo "desktop windows: $win"
 check "page open in the bot's visible browser (window title)" bash -c '[[ "$0" == *"Example Domain"* ]]' "$win"
 
+step "real browser: web chat websocket + a message round trip (scripted brain)"
+# A throwaway container from the bot image (Chromium + playwright-core) acts as
+# the user's browser on the stack's network. The password is passed by name
+# (-e ACCESS_PASSWORD), never on a command line.
+UI_NET=${SMOKE_UI_NETWORK:-${PROJECT}_front}
+UI_BASE=${SMOKE_UI_BASE:-http://proxy:8443}
+BOT_IMG=$(envval BOT_IMAGE); BOT_IMG=${BOT_IMG:-fugal-bot-bot:stage0}   # same default as compose.yaml
+uiout=$(ACCESS_PASSWORD="$PW" UI_BASE="$UI_BASE" UI_MODEL=scripted/tools UI_EXPECT="SCRIPTED-BRAIN DONE" \
+  timeout 420 docker run --rm -i --network "$UI_NET" --memory 1g --cap-drop ALL --security-opt no-new-privileges \
+  -e ACCESS_PASSWORD -e UI_BASE -e UI_MODEL -e UI_EXPECT --entrypoint node "$BOT_IMG" --input-type=module - \
+  < scripts/ui-check.mjs 2>&1)
+echo "$uiout" | grep -v "^PASS\|^FAIL"
+while IFS= read -r line; do
+  case "$line" in PASS*) ok "${line#PASS  }" ;; FAIL*) bad "${line#FAIL  }" ;; esac
+done <<< "$uiout"
+
 step "desktop view (noVNC) through the proxy"
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" "$BASE/desktop/vnc.html")
 check "noVNC page served (got $code)" test "$code" = 200

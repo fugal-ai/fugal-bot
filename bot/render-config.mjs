@@ -57,7 +57,13 @@ const modelName = need("MODEL_NAME");
 const providerId = "bot";
 const port = intEnv("PROXY_PORT", 8080);
 const hostname = (env.PUBLIC_HOSTNAME || "").trim();
-const origins = [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
+// The proxy checks that a browser's Origin is the address it is talking to,
+// then rewrites it to this one internal origin (any public name works: local,
+// PUBLIC_HOSTNAME, a tunnel URL). It MUST be in allowedOrigins, or the Control
+// UI's websocket is refused for every browser. Same value on both sides:
+// CONTROL_UI_ORIGIN from compose.yaml, same default in proxy/entrypoint.sh.
+const uiOrigin = (env.CONTROL_UI_ORIGIN || "https://bot.invalid").trim();
+const origins = [uiOrigin, `http://127.0.0.1:${port}`, `http://localhost:${port}`];
 if (hostname) origins.push(`https://${hostname}`, `https://${hostname}:${port}`);
 
 const execMode = ["full", "ask", "auto"].includes(env.EXEC_MODE) ? env.EXEC_MODE : "full";

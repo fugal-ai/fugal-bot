@@ -56,6 +56,7 @@ services:
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-}
       PROXY_PORT: ${PORT:-8080}
       PROXY_IP: ${FRONT_NET:-10.213.57}.10
+      CONTROL_UI_ORIGIN: ${CONTROL_UI_ORIGIN:-https://bot.invalid}   # shared with the proxy
       DESKTOP_GEOMETRY: ${DESKTOP_GEOMETRY:-1280x800}
       TZ: ${TZ:-UTC}
     volumes:
@@ -117,6 +118,7 @@ services:
       ACME_EMAIL: ${ACME_EMAIL:-}
       ALLOW_PUBLIC_HTTP: ${ALLOW_PUBLIC_HTTP:-}
       TUNNEL_IP: ${TUNNEL_NET:-10.213.58}.10
+      CONTROL_UI_ORIGIN: ${CONTROL_UI_ORIGIN:-https://bot.invalid}   # shared with the bot
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8080}:8443"
     volumes:
