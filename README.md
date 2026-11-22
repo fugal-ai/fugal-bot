@@ -204,6 +204,7 @@ bot/                   OpenClaw image + desktop, browser, config renderer
 gate/                  password login with rate limiting (Python stdlib)
 proxy/                 Caddy: the one port, TLS, routes to chat and desktop
 scripts/               smoke test and its test-only scripted model
+.github/workflows/     images.yml: CI publishes the three images to ghcr.io (tags v*, manual)
 UPSTREAM.md            pinned upstream, licences, what was changed
 SECURITY-NOTES.md      what is disabled, what the agent can reach, gaps
 NEXT.md                what is still missing; open questions
