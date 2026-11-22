@@ -34,9 +34,8 @@ RUN rm -rf /app/skills/clawhub \
 COPY --chown=root:root supervisord.conf /etc/fugal-bot/supervisord.conf
 COPY --chown=root:root entrypoint.sh render-config.mjs healthcheck.sh start-gateway.sh /opt/fugal-bot/
 COPY --chown=root:root openbox-autostart /etc/xdg/openbox/autostart
-COPY --chown=root:root novnc-index.html /usr/share/novnc/index.html
 RUN chmod 0755 /opt/fugal-bot/*.sh /etc/xdg/openbox/autostart \
- && chmod 0644 /opt/fugal-bot/render-config.mjs /etc/fugal-bot/supervisord.conf /usr/share/novnc/index.html
+ && chmod 0644 /opt/fugal-bot/render-config.mjs /etc/fugal-bot/supervisord.conf
 
 # Everything the bot owns lives under /home/node, which is the ONE persistent
 # volume (mounted by compose). Nothing secret is baked into this image.

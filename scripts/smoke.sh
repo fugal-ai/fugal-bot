@@ -180,6 +180,8 @@ ws=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" --max-time 4 --http1.1 \
 check "desktop websocket upgrades (got $ws)" test "$ws" = 101
 
 step "stop, start again, persistence"
+# Re-read: the browser check's scripted turn rewrites the file.
+file1=$("${DC[@]}" exec -T bot cat /home/node/workspace/smoke-file.txt 2>&1)
 "${DC[@]}" down || true
 "${DC[@]}" up -d || exit 1
 check "healthy again after restart" wait_healthy

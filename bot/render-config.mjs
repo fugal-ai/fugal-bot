@@ -145,6 +145,17 @@ const managed = {
     executablePath: "/usr/bin/chromium",
   },
 
+  // The Control UI's built-in Desktop panel shows this container's screen:
+  // attach to our own loopback x11vnc (port 5900, VncAuth password file
+  // written by entrypoint.sh). Same screen as /desktop/.
+  desktop: {
+    host: {
+      enabled: true,
+      port: 5900,
+      passwordFile: env.VNC_PASSWORD_FILE || "/home/node/.vnc/password.txt",
+    },
+  },
+
   // --- removed / disabled: marketplace, installs, updates, telemetry --------
   skills: {
     allowBundled: [], // no bundled third-party-CLI skills; built-in tools stay

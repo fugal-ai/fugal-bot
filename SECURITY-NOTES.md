@@ -63,6 +63,15 @@ one container, `bot`, as the unprivileged user `node` (uid 1000).
   `host.docker.internal`, which compose adds so the dev test can use a local
   model) and the host's LAN. OpenClaw's browser tool blocks private-network
   addresses by default (`ssrfPolicy`), but the shell does not.
+- **The screen (VNC)**: x11vnc listens on 127.0.0.1:5900 inside the bot
+  container only and requires a VNC password (VncAuth), generated at first
+  start into `~/.vnc/password.txt` (mode 600, on the volume, never logged).
+  OpenClaw's Desktop panel reads it from that file; the `/desktop/` page
+  receives it in the URL fragment, which browsers do not send to servers, so
+  it does not appear in proxy logs. Anyone past the access password can view
+  and control the screen, by design. VNC passwords are limited to 8
+  characters and VncAuth is weak; the real protection is that the port is
+  loopback-only and the pages sit behind the access password.
 - **Network, inbound**: none to the bot directly. The bot's ports (gateway
   18789, noVNC 6080) are only on the internal `front` network shared with the
   proxy. The only published port is the proxy's.

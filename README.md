@@ -31,7 +31,9 @@ When `docker compose ps` shows the services healthy, open
 - `/` is the web chat (OpenClaw's Control UI): chat, Settings, Channels,
   Automations, Agents, Sessions.
 - `/desktop/` is the bot's screen: a terminal, and Chromium when the agent
-  browses. Click and type to take over; you and the agent share it.
+  browses. Click and type to take over; you and the agent share it. The same
+  screen is also in the web chat's side panel (panel button at the top right,
+  then **Desktop**, then **Take control**).
 - `/_gate/logout` logs out.
 
 The agent can only use its computer with a model that supports tool calls.
@@ -189,8 +191,10 @@ are off.
 `scripts/smoke.sh [--fresh] [--keep]` builds and runs a separate copy (project
 `fugal-bot-smoke`, port 18080, its own volume) and checks, through the proxy:
 the login gate, the web UI, a model reply, a shell command, file and browser
-page made by the agent, the desktop endpoint, then a restart, and that the
-file and the conversation are still there. If the configured model cannot
+page made by the agent, then drives the real web chat in headless Chromium
+(websocket origin checks, a message typed in the page and its reply, the
+desktop page connecting), then restarts and checks that the file and the
+conversation are still there. If the configured model cannot
 call tools, the computer-use step is driven by a test-only scripted model
 (`scripts/scripted-brain/`) so that no paid call is needed. Secrets for a
 hosted model can be supplied with `SMOKE_SECRETS_FILE=<env file>`.

@@ -111,6 +111,20 @@ async function main() {
     }
     if (ok) pass(`browser: message sent from the page got a reply${EXPECT ? ` containing "${EXPECT}"` : ""}`);
     else { fail("browser: no reply in the page within 240 s"); console.log(text.slice(-800)); }
+
+    // The desktop page: noVNC must connect on its own (VNC password comes in
+    // the URL fragment) without asking for credentials.
+    await page.goto(`${BASE}/desktop/`, { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(8000);
+    const vnc = await page.evaluate(() => ({
+      url: location.pathname,
+      askedForPassword: !!document.querySelector("#noVNC_credentials_dlg.noVNC_open"),
+      canvas: [...document.querySelectorAll("#noVNC_container canvas, canvas")].some((c) => c.width > 100),
+      status: (document.querySelector("#noVNC_status")?.textContent || "").trim().slice(0, 80),
+    }));
+    console.log(`      desktop page: ${JSON.stringify(vnc)}`);
+    if (vnc.canvas && !vnc.askedForPassword) pass("browser: /desktop/ connected to the bot's screen without a password prompt");
+    else fail("browser: /desktop/ did not connect");
   } finally {
     await browser.close();
   }
