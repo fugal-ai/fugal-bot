@@ -1,0 +1,101 @@
+# Builds and publishes the three Fugal Bot images to GitHub Container Registry,
+# so hosts can pull them (BOT_IMAGE / GATE_IMAGE / PROXY_IMAGE) instead of
+# building. Images are traceable to the commit that built them.
+name: images
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io/fugal-ai
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags and build date
+        id: meta
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          for img in fugal-bot fugal-bot-gate fugal-bot-proxy; do
+            tags="$REGISTRY/$img:$SHA"
+            if [ "$REF_TYPE" = tag ]; then tags="$tags,$REGISTRY/$img:$REF_NAME"; fi
+            key=$(echo "$img" | tr '-' '_')
+            echo "${key}=${tags}" >> "$GITHUB_OUTPUT"
+          done
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push fugal-bot
+        id: bot
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: bot
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.fugal_bot }}
+          build-args: |
+            GIT_REVISION=${{ github.sha }}
+            BUILD_DATE=${{ steps.meta.outputs.date }}
+
+      - name: Build and push fugal-bot-gate
+        id: gate
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: gate
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.fugal_bot_gate }}
+
+      # The proxy is published from Dockerfile.nocap (Caddy from its checksummed
+      # release archive), NOT from the official caddy image: the official image
+      # sets a file capability on its binary, and layers carrying file
+      # capabilities cannot be unpacked on hosts whose file system cannot store
+      # them (e.g. gVisor sandboxes such as Cathedral rooms). This one works
+      # everywhere, including the default layout.
+      - name: Build and push fugal-bot-proxy
+        id: proxy
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: proxy
+          file: proxy/Dockerfile.nocap
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.fugal_bot_proxy }}
+
+      - name: Digests for .env
+        env:
+          BOT: ${{ steps.bot.outputs.digest }}
+          GATE: ${{ steps.gate.outputs.digest }}
+          PROXY: ${{ steps.proxy.outputs.digest }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "### Images built from commit \`$SHA\`"
+            echo
+            echo '```'
+            echo "BOT_IMAGE=$REGISTRY/fugal-bot@$BOT"
+            echo "GATE_IMAGE=$REGISTRY/fugal-bot-gate@$GATE"
+            echo "PROXY_IMAGE=$REGISTRY/fugal-bot-proxy@$PROXY"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
