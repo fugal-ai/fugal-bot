@@ -19,11 +19,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-PROJECT=fugal-bot-smoke
+PROJECT=${SMOKE_PROJECT:-fugal-bot-smoke}
 export PORT=${SMOKE_PORT:-18080} BIND_ADDRESS=127.0.0.1 PUBLIC_HOSTNAME=
 ENVF=(--env-file .env)
 [ -n "${SMOKE_SECRETS_FILE:-}" ] && ENVF+=(--env-file "$SMOKE_SECRETS_FILE")
-DC=(docker compose -p "$PROJECT" "${ENVF[@]}" -f compose.yaml -f scripts/smoke.compose.yaml)
+FILES=()
+IFS=: read -r -a CF <<< "${SMOKE_COMPOSE_FILES:-compose.yaml:scripts/smoke.compose.yaml}"
+for f in "${CF[@]}"; do FILES+=(-f "$f"); done
+DC=(docker compose -p "$PROJECT" "${ENVF[@]}" "${FILES[@]}")
 envval() { local v; v=$(printenv "$1"); [ -n "$v" ] && { echo "$v"; return; }; grep -E "^$1=" .env | tail -1 | cut -d= -f2-; }
 TOOLS=$(envval MODEL_SUPPORTS_TOOLS); TOOLS=${TOOLS:-true}
 BASE="http://127.0.0.1:${PORT}"

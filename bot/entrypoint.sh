@@ -11,6 +11,8 @@ mkdir -p "$HOME/.openclaw" "$HOME/workspace" "$HOME/Desktop" "$HOME/.config"
 # want one. A real key arrives only through the environment (.env), never the image.
 : "${MODEL_API_KEY:=not-needed}"
 export MODEL_API_KEY
+: "${NOVNC_LISTEN:=0.0.0.0:6080}"
+export NOVNC_LISTEN
 : "${DESKTOP_GEOMETRY:=1280x800}"
 export DESKTOP_GEOMETRY
 

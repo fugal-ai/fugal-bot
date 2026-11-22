@@ -19,4 +19,4 @@ if [ -n "$fp" ]; then
   echo "[fugal-bot] recovering a stale gateway lock left by a previous run"
   node /app/openclaw.mjs gateway recover-lock --confirm "$fp" >/dev/null 2>&1 || true
 fi
-exec node /app/docker-entrypoint.mjs node /app/openclaw.mjs gateway --bind lan --port 18789
+exec node /app/docker-entrypoint.mjs node /app/openclaw.mjs gateway --bind "${GATEWAY_BIND:-lan}" --port 18789

@@ -3,7 +3,14 @@
 #   PUBLIC_HOSTNAME set   -> HTTPS with an automatic Let's Encrypt certificate
 #                            (TLS-ALPN challenge on the one published port, 443).
 #   PUBLIC_HOSTNAME empty -> plain HTTP (meant for 127.0.0.1 only).
+# Addresses are overridable for the all-host-network layout (compose.cathedral.yaml).
 set -eu
+LISTEN_PORT="${PROXY_LISTEN_PORT:-8443}"
+LISTEN_HOST="${PROXY_LISTEN_HOST:-}"
+HEALTH_PORT="${PROXY_HEALTH_PORT:-8081}"
+GATE="${GATE_UPSTREAM:-gate:9000}"
+GATEWAY="${GATEWAY_UPSTREAM:-bot:18789}"
+DESKTOP="${DESKTOP_UPSTREAM:-bot:6080}"
 BIND="${BIND_ADDRESS:-127.0.0.1}"
 case "$BIND" in 127.0.0.1|localhost|::1|"[::1]") LOOPBACK=1 ;; *) LOOPBACK=0 ;; esac
 if [ -z "${ACCESS_PASSWORD:-}" ]; then
@@ -24,20 +31,25 @@ if [ -n "${PUBLIC_HOSTNAME:-}" ]; then
 		}
 	}"
   HSTS='Strict-Transport-Security "max-age=31536000"'
-  HTTPS_PORT=8443
+  HTTPS_PORT="$LISTEN_PORT"
+  HTTP_PORT=8448                     # unused (no port-80 challenge, no redirects)
 else
-  SITE="http://:8443"
+  SITE="http://:${LISTEN_PORT}"
   TLS=""
   HSTS=""
-  HTTPS_PORT=8444   # unused; Caddy refuses http:// on its https_port
+  HTTP_PORT="$LISTEN_PORT"
+  HTTPS_PORT=8449                    # unused; Caddy refuses http:// on its https_port
 fi
+DEFAULT_BIND=""
+[ -n "$LISTEN_HOST" ] && DEFAULT_BIND="default_bind ${LISTEN_HOST}"
 
 cat > /tmp/Caddyfile <<CADDY
 {
 	admin off
 	persist_config off
-	http_port 8080
+	http_port ${HTTP_PORT}
 	https_port ${HTTPS_PORT}
+	${DEFAULT_BIND}
 	auto_https disable_redirects
 	servers {
 		# The optional tunnel (compose profile "tunnel") is the only proxy in
@@ -48,7 +60,7 @@ cat > /tmp/Caddyfile <<CADDY
 }
 
 # Local-only health endpoint for the container healthcheck (both modes).
-http://127.0.0.1:8081 {
+http://127.0.0.1:${HEALTH_PORT} {
 	bind 127.0.0.1
 	respond /_proxy/health "ok" 200
 }
@@ -70,7 +82,7 @@ ${SITE} {
 		respond "ok" 200
 	}
 	handle /_gate/* {
-		reverse_proxy gate:9000 {
+		reverse_proxy ${GATE} {
 			header_up X-Gate-Client-IP {client_ip}
 		}
 	}
@@ -79,7 +91,7 @@ ${SITE} {
 		# Identity comes only from the gate, never from the client.
 		request_header -X-Forwarded-User
 		request_header -X-Gate-User
-		forward_auth gate:9000 {
+		forward_auth ${GATE} {
 			uri /_gate/check
 			header_up X-Gate-Client-IP {client_ip}
 			copy_headers X-Gate-User>X-Forwarded-User
@@ -94,10 +106,10 @@ ${SITE} {
 		# The bot's desktop (noVNC + websocket), watch and take over.
 		redir /desktop /desktop/ 308
 		handle_path /desktop/* {
-			reverse_proxy bot:6080
+			reverse_proxy ${DESKTOP}
 		}
 		# Everything else: the agent's web chat / control UI.
-		reverse_proxy bot:18789
+		reverse_proxy ${GATEWAY}
 	}
 }
 CADDY

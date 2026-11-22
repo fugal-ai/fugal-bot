@@ -66,7 +66,7 @@ const managed = {
   gateway: {
     mode: "local",
     port: 18789,
-    bind: "lan",
+    bind: env.GATEWAY_BIND === "loopback" ? "loopback" : "lan",
     // Only the password proxy (fixed address on the compose "front" network)
     // may assert identity. Not the subnet: Docker's gateway address on that
     // network is where published-port clients appear from.
@@ -77,7 +77,9 @@ const managed = {
         userHeader: "x-forwarded-user",
         requiredHeaders: ["x-forwarded-proto", "x-forwarded-host"],
         allowUsers: ["owner"],
-        allowLoopback: false,
+        // Only in the all-host-network layout (compose.cathedral.yaml), where the
+        // proxy necessarily connects from 127.0.0.1. See SECURITY-NOTES.md.
+        allowLoopback: env.PROXY_FROM_LOOPBACK === "true",
         deviceAutoApprove: { enabled: true },
       },
       identityScopes: { owner: ["operator.admin"] },

@@ -192,7 +192,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    srv = ThreadingHTTPServer(("0.0.0.0", 9000), Handler)
+    bind = os.environ.get("GATE_LISTEN_HOST", "0.0.0.0")
+    port = int(os.environ.get("GATE_LISTEN_PORT", "9000"))
+    srv = ThreadingHTTPServer((bind, port), Handler)
     srv.daemon_threads = True
-    print("[gate] listening on :9000", flush=True)
+    print(f"[gate] listening on {bind}:{port}", flush=True)
     srv.serve_forever()

@@ -1,0 +1,82 @@
+# Overlay for hosts where Docker has NO NAT (e.g. Cathedral sandbox rooms:
+# dockerd runs with --bridge=none --iptables=false under gVisor). There, a
+# container on a compose bridge network cannot reach the internet, and
+# host.docker.internal does not resolve. So in this layout EVERY service uses
+# the host network and talks to its siblings on 127.0.0.1:<fixed port>, all
+# bound to loopback. The only thing published to the world is the proxy's port,
+# and only through the optional Cloudflare tunnel (outbound connection).
+#
+# Use:   docker compose -f compose.yaml -f compose.cathedral.yaml --profile tunnel up -d --build
+# Needs: DATA_DIR (an existing directory; all data is bind-mounted under it),
+#        ACCESS_PASSWORD of 12+ characters (the tunnel refuses to start otherwise).
+#
+# Loopback ports used (must be free on the host):
+#   PORT (default 8080) proxy, the one public entry  | 8081 proxy health
+#   9000 password gate | 18789 agent gateway (+ OpenClaw's own loopback ports
+#   just above it, e.g. 18790-18800 for the browser) | 6080 noVNC | 5900 VNC
+#   2000 cloudflared metrics (tunnel URL)
+#
+# Security difference from the default layout: the gateway must accept the
+# proxy's identity header from 127.0.0.1, so ANY process on the host network
+# (including the agent's own shell) could send it. See SECURITY-NOTES.md.
+
+x-hostnet: &hostnet
+  network_mode: host
+  networks: !reset []
+
+services:
+  volume-init:
+    volumes: !override
+      - ${DATA_DIR:?set DATA_DIR to an existing directory}:/v
+
+  bot:
+    <<: *hostnet
+    build:
+      context: ./bot
+      network: host
+    extra_hosts: !reset []
+    environment:
+      GATEWAY_BIND: loopback
+      NOVNC_LISTEN: 127.0.0.1:6080
+      PROXY_IP: 127.0.0.1
+      PROXY_FROM_LOOPBACK: "true"
+    volumes: !override
+      - ${DATA_DIR:?set DATA_DIR}/home:/home/node
+    mem_limit: ${BOT_MEM_LIMIT:-4g}
+
+  gate:
+    <<: *hostnet
+    build:
+      context: ./gate
+      network: host
+    environment:
+      GATE_LISTEN_HOST: 127.0.0.1
+      GATE_LISTEN_PORT: "9000"
+
+  proxy:
+    <<: *hostnet
+    build:
+      context: ./proxy
+      network: host
+    ports: !reset []
+    environment:
+      PROXY_LISTEN_HOST: 127.0.0.1
+      PROXY_LISTEN_PORT: ${PORT:-8080}
+      PROXY_HEALTH_PORT: "8081"
+      GATE_UPSTREAM: 127.0.0.1:9000
+      GATEWAY_UPSTREAM: 127.0.0.1:18789
+      DESKTOP_UPSTREAM: 127.0.0.1:6080
+      TUNNEL_IP: 127.0.0.1
+    volumes: !override
+      - ${DATA_DIR:?set DATA_DIR}/proxy:/data
+
+  tunnel:
+    <<: *hostnet
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:2000", "--url", "http://127.0.0.1:${PORT:-8080}"]
+
+  tunnel-url:
+    <<: *hostnet
+    environment:
+      TUNNEL_METRICS: 127.0.0.1:2000
+    volumes: !override
+      - ${DATA_DIR:?set DATA_DIR}:/v

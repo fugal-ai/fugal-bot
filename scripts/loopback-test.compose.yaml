@@ -1,0 +1,69 @@
+# TEST ONLY: exercises compose.cathedral.yaml's all-on-loopback layout on an
+# ordinary Docker host WITHOUT using the real host network: every service joins
+# one shared network namespace (the "netns" container, which has normal
+# outbound access), so they reach each other on 127.0.0.1:<port> exactly as on
+# a host-network-only machine. Data stays in a named volume (no host bind).
+#
+#   DATA_DIR=/unused SMOKE_PROJECT=fugal-bot-looptest SMOKE_PORT=18095 \
+#   SMOKE_COMPOSE_FILES=compose.yaml:compose.cathedral.yaml:scripts/smoke.compose.yaml:scripts/loopback-test.compose.yaml \
+#   scripts/smoke.sh --fresh
+x-shared: &shared
+  network_mode: "service:netns"
+  networks: !reset []
+
+services:
+  netns:
+    image: caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    entrypoint: ["sleep", "infinity"]
+    networks: [loopnet]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${PORT:-8080}:${PORT:-8080}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 32m
+
+  volume-init:
+    volumes: !override
+      - botdata:/v
+  bot:
+    <<: *shared
+    depends_on: [netns]
+    environment:
+      SCRIPTED_BRAIN_URL: http://127.0.0.1:11500/v1
+    volumes: !override
+      - type: volume
+        source: botdata
+        target: /home/node
+        volume: { subpath: home }
+    mem_limit: 2560m
+  gate:
+    <<: *shared
+    depends_on: [netns]
+  proxy:
+    <<: *shared
+    environment:
+      # Test only: also listen on the shared namespace's own interface so the
+      # port published by "netns" reaches it. In a real room it stays 127.0.0.1.
+      PROXY_LISTEN_HOST: ""
+    volumes: !override
+      - type: volume
+        source: botdata
+        target: /data
+        volume: { subpath: proxy }
+  tunnel:
+    <<: *shared
+  tunnel-url:
+    <<: *shared
+    volumes: !override
+      - botdata:/v
+  brain:
+    <<: *shared
+    depends_on: [netns]
+
+networks:
+  loopnet: {}
+
+volumes:
+  botdata: {}

@@ -32,7 +32,9 @@ services:
     <<: *hardening
     build:
       context: ./bot
-    image: fugal-bot-bot:stage0
+    # Set BOT_IMAGE to a published, digest-pinned image to skip the local build
+    # (then `docker compose pull bot` before `up`).
+    image: ${BOT_IMAGE:-fugal-bot-bot:stage0}
     hostname: bot
     stop_grace_period: 45s
     depends_on:
@@ -173,7 +175,9 @@ services:
   tunnel-url:
     <<: *hardening
     profiles: [tunnel]
-    image: fugal-bot-proxy:stage0   # built by the proxy service; has the script
+    build:
+      context: ./proxy   # same image as the proxy (it carries the script)
+    image: fugal-bot-proxy:stage0
     user: "0:0"
     depends_on: [tunnel]
     entrypoint: ["/bin/sh", "/usr/local/bin/fugal-bot-tunnel-url"]
