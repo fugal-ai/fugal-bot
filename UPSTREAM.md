@@ -72,7 +72,7 @@ is reproducible by us, not only pinned.
 |---|---|---|---|
 | Caddy 2.11.9 (`caddy:2.11.9-alpine`) | reverse proxy, TLS | `caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0` | Apache-2.0 |
 | Caddy 2.11.9 release archive (only for `compose.cathedral.yaml`, `proxy/Dockerfile.nocap`) | same proxy, on hosts that cannot store file capabilities | SHA-512 of `caddy_2.11.9_linux_{amd64,arm64}.tar.gz` checked in the Dockerfile | Apache-2.0 |
-| Python 3.13 (`python:3.13-alpine`) | password gate (stdlib only), test brain | `python@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e` | PSF-2.0 |
+| Python 3.13 (`python:3.13-alpine`) | password gate and model proxy (both stdlib only), test brain | `python@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e` | PSF-2.0 |
 | cloudflared 2026.11.1 (optional `tunnel` profile) | outbound tunnel | `cloudflare/cloudflared@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d` | Apache-2.0 |
 | Node.js 24 + Debian trixie (inside the OpenClaw image) | runtime | via the OpenClaw digest | MIT (Node.js); Debian packages under their own licences |
 | noVNC | desktop in the browser | Debian trixie package | MPL-2.0 |

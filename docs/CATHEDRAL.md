@@ -48,6 +48,10 @@ BOT_MEM_LIMIT=4g
 # optional: TELEGRAM_BOT_TOKEN=...
 ```
 
+`MODEL_BASE_URL` and `MODEL_API_KEY` reach only the `modelproxy` service, not
+the agent (see "What differs" below for what that means in this layout).
+Optional `BUDGET_*` caps: `.env.example`.
+
 `COMPOSE_FILE` makes a plain `docker compose ...` in the room use the overlay.
 Compose resolves `COMPOSE_FILE` from `.env` against the **working directory**,
 not `--project-directory`, so run compose with the working directory set to
@@ -77,9 +81,14 @@ file, digest-pinned published images:
 
 ```
 BOT_IMAGE=<registry>/fugal-bot@sha256:...
+MODELPROXY_IMAGE=<registry>/fugal-bot-modelproxy@sha256:...
 GATE_IMAGE=<registry>/fugal-bot-gate@sha256:...
 PROXY_IMAGE=<registry>/fugal-bot-proxy@sha256:...   # the proxy/Dockerfile.nocap build
 ```
+
+(The `images` workflow writes these four lines, with digests, to its job
+summary and into the `images.env` of the release bundle
+`fugal-bot-room-<version>.tgz`, next to the compose files.)
 
 and in the room (working directory `/workspace/app`):
 
@@ -130,14 +139,23 @@ off-site backup.
   runs inside the gateway with the same rights, so this widens access only
   for other processes in the room (there are none besides ours).
 - Every listener binds to `127.0.0.1` (proxy 8080, health 8081, gate 9000,
-  gateway 18789 and OpenClaw's neighbouring ports, noVNC 6080, VNC 5900,
-  cloudflared metrics 2000). Only the tunnel publishes anything.
+  model proxy 9001, gateway 18789 and OpenClaw's neighbouring ports, noVNC
+  6080, VNC 5900, cloudflared metrics 2000). Only the tunnel publishes
+  anything.
+- The model proxy (`modelproxy`, `127.0.0.1:9001`) holds the model key; the
+  agent is configured with `http://127.0.0.1:9001/v1` and a placeholder. In
+  this layout there is no network separation around it: every process in the
+  room can call it and so spend inference, up to the budget. The key itself
+  stays in the model proxy's container (its environment is not readable from
+  the agent's container), and the public proxy does not route to port 9001.
+  `SECURITY-NOTES.md`, "The model key", has the details.
 - Seen working in a real room so far: the overlay validates with Compose
   2.33, the `Dockerfile.nocap` proxy image builds (archive checksum passed),
   the python-alpine helper image pulls.
 - Tested locally: the loopback wiring (all services in one shared network
   namespace on an ordinary Docker host, `scripts/loopback-test.compose.yaml`),
-  and the quick tunnel on the default layout.
+  including the model proxy on `127.0.0.1:9001`, and the quick tunnel on the
+  default layout.
 - Not yet confirmed in a real room: the bot image build under gVisor,
   `DATA_DIR` bind mounts on `/workspace` (Cathedral reports that they work for
   data and SQLite), the cold-start time, Chromium under gVisor, and

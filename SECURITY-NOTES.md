@@ -48,21 +48,21 @@ one container, `bot`, as the unprivileged user `node` (uid 1000).
   write: its home `/home/node` (the persistent volume: workspace, sessions,
   memory, browser profile, OpenClaw config) and `/tmp`. Nothing from the host
   is mounted. No Docker socket.
-- **Secrets inside the container**: the model API key and the Telegram token
-  are in the gateway's environment. The agent's shell runs as the same user,
-  so **a model that decides to (or is prompt-injected to) read them can**.
-  They are never written to disk by us (the config holds `{source:"env"}`
-  references).
+- **Secrets inside the container**: the Telegram token (if set) is in the
+  gateway's environment. The agent's shell runs as the same user, so **a
+  model that decides to (or is prompt-injected to) read it can**. It is never
+  written to disk by us (the config holds a `{source:"env"}` reference).
+  The **model API key is not in this container**; see "The model key" below.
 - **Processes and privileges**: all Linux capabilities dropped,
   `no-new-privileges`, no root, 1024 pids, memory limit 2.5 GiB, 2 CPUs.
   Chromium runs with `--no-sandbox` (its own sandbox needs user namespaces we
   do not grant); the container is the boundary.
 - **Network, outbound**: unrestricted. The browser and shell can reach the
   internet. They can also reach anything the host network can reach,
-  including services on the host (via the Docker bridge gateway, and via
-  `host.docker.internal`, which compose adds so the dev test can use a local
-  model) and the host's LAN. OpenClaw's browser tool blocks private-network
-  addresses by default (`ssrfPolicy`), but the shell does not.
+  including services on the host (via the Docker bridge gateway) and the
+  host's LAN. OpenClaw's browser tool blocks private-network addresses by
+  default (`ssrfPolicy`), but the shell does not. (`host.docker.internal`,
+  for a model server on the host, is now only added to the model proxy.)
 - **The screen (VNC)**: x11vnc listens on 127.0.0.1:5900 inside the bot
   container only and requires a VNC password (VncAuth), generated at first
   start into `~/.vnc/password.txt` (mode 600, on the volume, never logged).
@@ -77,7 +77,93 @@ one container, `bot`, as the unprivileged user `node` (uid 1000).
   proxy. The only published port is the proxy's.
 - **Other containers**: the gate has no network except to the proxy (internal
   network, no egress). The optional tunnel only talks to the proxy and
-  Cloudflare.
+  Cloudflare. The model proxy talks to the bot (internal network) and to the
+  model endpoint.
+
+### The model key
+
+`MODEL_BASE_URL` and `MODEL_API_KEY` are given only to the `modelproxy`
+container (stdlib Python, uid 1002, read-only file system, no capabilities).
+The bot container is configured with `http://modelproxy:9001/v1` and the
+placeholder key `held-by-modelproxy`. The model proxy drops whatever
+`Authorization` header it receives and adds the real one.
+
+What this gives:
+
+- The key is not in the agent container's environment, in any process there,
+  in its config or its data directory, so the agent's shell cannot read it
+  and a prompt injection cannot exfiltrate it. `scripts/smoke.sh` searches
+  all of those for the key on every run.
+- The model proxy does not hand the key out: it only connects to the one
+  endpoint fixed at its start, follows no redirects, forwards only inference
+  calls (`chat/completions`, `completions`, `responses`, `embeddings`,
+  `models`; nothing like key or account management), and logs one line per
+  request with the path, status, token counts and duration: never a body, a
+  header or the key.
+- Spending is bounded if you set a budget (`BUDGET_*`): the counters and the
+  caps live in the model proxy and in `modelproxy/` on the volume, which is
+  owned by its own user and not mounted into the agent container.
+
+- With a budget, a call that arrives after a cap is reached is answered by
+  the model proxy itself and tells the user why (`docs/MODELPROXY.md`).
+
+What it does not give:
+
+- The agent can still **use** the key through the model proxy: any process in
+  the agent container can make inference calls with it, up to the budget.
+  Without a budget, a hijacked agent can spend without limit.
+- The agent can read the usage counters (`GET /usage`); they hold numbers
+  only.
+- The host still sees the key (`.env`, the model proxy's environment).
+- A key that was used with an earlier version of this package was in the
+  agent's environment then. Treat it as exposed and replace it.
+- Token counts come from the endpoint's own `usage` field. If an endpoint
+  sends none, the model proxy counts a rough estimate (and marks it), so a
+  cap in tokens or dollars is then approximate. A cap is checked before a
+  call, so the last call overshoots it by its own size.
+
+Who can reach the model proxy, by layout:
+
+- **Default layout**: only the bot. The two share an internal Docker network
+  (`modelnet`) that nothing else is attached to; the model proxy publishes no
+  port; the public proxy, the gate and the tunnel have no route to it.
+- **All-host-network layout (`compose.cathedral.yaml`)**: the model proxy
+  listens on `127.0.0.1:9001` in the one shared network namespace, so **every
+  process on that host can call it**, not only the agent: the other services,
+  and anything else running there. It still is not routed by the public
+  proxy, so it is not reachable from the internet. What still separates the
+  agent from the key in this layout is the container boundary alone, without
+  any network separation: the key is in the environment of a process in
+  another container (separate mount and process namespaces, a different user
+  id, no capabilities on either side, no Docker socket), and the model
+  proxy's protocol has no call that returns it. The agent cannot capture
+  traffic either (no `CAP_NET_RAW`), and the key leaves the model proxy only
+  inside TLS to the endpoint (with a plain `http://` endpoint it would cross
+  the loopback interface unencrypted; the model proxy logs a note at start).
+  A kernel or sandbox escape from the agent container would defeat this, as
+  it would defeat the default layout.
+
+With a central gateway (the same program with `MODELPROXY_MODE=gateway`, run
+by whoever hosts many bots; `docs/MODELPROXY.md`), the bot's model proxy is
+given the gateway's address and a per-bot token instead of a provider key:
+
+- Nothing in the bot's compose application is then worth more than that one
+  bot: the token can spend that bot's daily allowance on the models on its
+  list and nothing else, and the gateway can switch it off or replace it
+  without touching the bot. The provider key exists only in the gateway.
+- The gateway stores the SHA-256 of each token, not the token. Its admin API
+  (the tenant table, the usage report) is on a second listener that must not
+  be published; the main listener answers `/admin/*` with 404. Anyone who can
+  reach the admin listener can replace the tenant table, so keep it on a
+  private network, and set `MODELPROXY_ADMIN_TOKEN` if other containers share
+  that network.
+- Whoever runs the gateway can read every request and reply that passes
+  through it (it ends the bots' TLS and opens its own to the provider), and
+  sees which bot sent what and when. The program logs and stores only the
+  bot id, path, status, token counts and duration per request.
+- A bot's allowance is checked before a call and the cost is known after it:
+  a bot can overshoot by the cost of the calls it has in progress (at most
+  `MODELPROXY_TENANT_CONCURRENCY`, default 4).
 
 **All-host-network layout (`compose.cathedral.yaml`)**: on hosts without
 container NAT, every service shares the host's network namespace and listens
@@ -115,7 +201,9 @@ equal the address the browser is talking to) and again by the gateway.
   without asking. `EXEC_MODE=ask` turns on OpenClaw's approval flow.
 - **Prompt injection**: any web page or message the agent reads can try to
   steer it. With full shell access and unrestricted egress, a successful
-  injection can exfiltrate whatever the bot can read (see section 2).
+  injection can exfiltrate whatever the bot can read (see section 2): the
+  conversations, files, browser logins and the Telegram token, but not the
+  model key. It can also spend the inference allowance, up to the budget.
 - **One shared password**, no accounts, no 2FA; the session cookie lasts 7
   days (`SESSION_HOURS`).
 - **Supply chain**: images are pinned by digest, but the Debian packages added
@@ -124,7 +212,10 @@ equal the address the browser is talking to) and again by the gateway.
   own source build (see `UPSTREAM.md`).
 - **Background model use**: OpenClaw's memory plugin schedules a "dreaming"
   (memory consolidation) job; with a paid model this spends tokens without a
-  user message.
+  user message. It goes through the model proxy like every other call, so it
+  is counted and a budget bounds it.
+- **The Telegram token is still in the agent container** (its environment),
+  readable by the agent. Only the model key has been moved out.
 
 ## 4. What the sealed stage (TDX VM with dstack) needs from this package
 
@@ -138,9 +229,9 @@ port, secrets only from the environment, digest-pinned images. Still needed:
 2. **Secrets entered inside the box**: the model key, Telegram token and access
    password must arrive encrypted to the attested VM (dstack's encrypted
    environment, or a first-run page served over attested TLS), never via a
-   host-readable `.env`. Ideally the model key moves out of the agent's
-   container into a small egress proxy that adds it to requests, so the agent
-   never sees it.
+   host-readable `.env`. The model key is already outside the agent's
+   container (the model proxy adds it to requests); the Telegram token needs
+   the same treatment.
 3. **TLS terminating inside the box**: Caddy (already in the package) with a
    certificate whose key never leaves the VM, plus attestation evidence that
    binds the certificate to the measured compose (dstack-ingress style), so a
@@ -152,6 +243,7 @@ port, secrets only from the environment, digest-pinned images. Still needed:
 5. **Reproducible images**: rebuild OpenClaw from its pinned commit, pin Debian
    packages to a snapshot date, publish the image digests, so the measured
    compose hash means something to a third party.
-6. **Remove dev conveniences**: drop `host.docker.internal`, keep
+6. **Remove dev conveniences**: drop `host.docker.internal` (now only on the
+   model proxy), keep
    `ENABLE_OPENAI_API` off unless needed, and make the config read-only to the
    agent (separate users for gateway and shell).
