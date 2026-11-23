@@ -27,7 +27,7 @@ fetches or runs third-party code or calls home.
 | Control UI extras that fetch the internet | `controlUi.communityInvite: false`, `controlUi.automaticallyFetchFavicons: false` | same |
 | Gateway's own token/password auth | replaced by `trusted-proxy` mode: only our proxy, at one fixed address, may assert the user, and only as `owner` | same |
 | Telegram groups | `groupPolicy: "disabled"`; DMs need pairing approval or an allowlist | same |
-| Tools that cannot work here (paired devices, voice and meeting capture, publishing to GitHub, the plugin installer, self-written skills) | `tools.deny` (15 names; `TOOLS_DENY` changes the list) | same |
+| Tools that cannot work here (paired devices, voice and meeting capture, publishing to GitHub, the plugin installer, self-written skills, portals) | `tools.deny` (16 names; `TOOLS_DENY` changes the list) | same |
 | Background model calls, when `BACKGROUND_MODEL_USE=off` | `plugins.entries.memory-core.config.dreaming.enabled: false`; OpenClaw then removes its "Memory Dreaming Promotion" job | same |
 
 The config renderer runs at every start and forces these keys back, so a

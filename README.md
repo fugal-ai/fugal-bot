@@ -129,9 +129,16 @@ Set in `.env`, applied by `bot/render-config.mjs` at every start:
 - `BACKGROUND_MODEL_USE=off`: no model calls without a message from you. It
   switches off OpenClaw's nightly memory consolidation ("dreaming"), the one
   job this version schedules by itself. Schedules you set up still run.
-- `TOOLS_DENY`: tools left out of what is sent to the model. By default the 15
+- `TOOLS_DENY`: tools left out of what is sent to the model. By default the 16
   that cannot work in this package (paired devices, voice and meeting capture,
-  publishing to GitHub, plugin installs, self-written skills).
+  publishing to GitHub, plugin installs, self-written skills, portals: an app
+  preview needs a private wildcard HTTPS ingress that a hosted bot behind one
+  hostname does not have; OpenClaw v2026.11.6 has no switch that hides the
+  Portals page itself).
+- `TZ` (an IANA name; the controller passes the owner's browser zone) is also
+  written to `agents.defaults.userTimezone`, the agent's local time. The
+  Automations form's grey "America/Los_Angeles" is only OpenClaw's placeholder;
+  a blank zone there means the container's `TZ`.
 
 Always on: OpenClaw is told the endpoint reports token usage on streamed
 replies (so it knows how full the context is), the browser tool returns

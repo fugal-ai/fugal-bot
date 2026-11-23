@@ -114,6 +114,18 @@ if ((env.MODEL_EXTRA_BODY || "").trim()) {
 }
 const modelRef = `${providerId}/${modelName}`;
 
+// The owner's time zone (TZ, an IANA name the controller takes from their
+// browser) for the agent's sense of local time and for schedules.
+const tz = (env.TZ || "").trim();
+let userTimezone = "";
+if (tz) {
+  try {
+    userTimezone = new Intl.DateTimeFormat("en-US", { timeZone: tz }).resolvedOptions().timeZone;
+  } catch {
+    console.error(`[fugal-bot] TZ "${tz}" is not a known time zone; agents.defaults.userTimezone left as it is`);
+  }
+}
+
 // What this script applied from the environment last time (no secrets). It
 // lets the name and emoji be defaults rather than forced values: a new value
 // in the environment is applied once, and a later change made in the web UI
@@ -139,7 +151,10 @@ const backgroundOff = (env.BACKGROUND_MODEL_USE || "").trim().toLowerCase() === 
 // characters less per request, most of it the github_publish schema):
 //   paired devices (none can be paired here), voice and meeting capture (no
 //   provider), publishing to GitHub (no GitHub identity), plugin installs and
-//   self-written skills (both blocked below).
+//   self-written skills (both blocked below), portals (an app preview needs a
+//   private wildcard HTTPS ingress, gateway.portals.ingress, which a hosted bot
+//   behind one tunnel hostname does not have: the Portals pane only says "This
+//   portal needs a remote address"; AGENTS.md tells the agent what to do instead).
 // Reading public GitHub (github_read, github_search) stays. TOOLS_DENY
 // replaces the list; TOOLS_DENY=none denies nothing.
 const DEFAULT_TOOLS_DENY = [
@@ -147,6 +162,7 @@ const DEFAULT_TOOLS_DENY = [
   "talk_voice", "tts", "transcripts",
   "github_publish", "github_identity_status",
   "plugins", "skill_workshop",
+  "portal",
 ];
 const toolsDenyRaw = (env.TOOLS_DENY || "").trim();
 const toolsDeny = toolsDenyRaw.toLowerCase() === "none" ? [] : toolsDenyRaw ? list(toolsDenyRaw) : DEFAULT_TOOLS_DENY;
@@ -222,6 +238,7 @@ const managed = {
     defaults: {
       model: { primary: modelRef },
       workspace: env.OPENCLAW_WORKSPACE_DIR || "/home/node/workspace",
+      ...(userTimezone ? { userTimezone } : {}),
     },
   },
 
