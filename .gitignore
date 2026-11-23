@@ -9,3 +9,4 @@ tmp/
 scratch/
 *.tgz
 TUNNEL_URL.txt
+__pycache__/
