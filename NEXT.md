@@ -34,7 +34,7 @@ Identity, first run and backups, known limits:
   `taoq` read in the bot's shell, the job in OpenClaw's table, one forced run,
   the file deleted. A real model has not run the new script yet: the
   conversation to try and what success looks like are in `docs/TAOQ.md`.
-- A daily stake report costs 2 model calls (an isolated run with light
+- A daily briefing (formerly the stake report) costs 2 model calls (an isolated run with light
   context and only `exec`). The 6-hourly subnet and hotkey watches are
   OpenClaw script jobs running `taoq ... --watch --text`: no model call per
   check, and a message only when something is new, worse or resolved

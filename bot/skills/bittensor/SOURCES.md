@@ -9,6 +9,30 @@ published, may be marketing) > **aggregators** (third-party, may lag or be
 wrong) > **news and social** (opinion). A subnet identity on chain is
 self-declared: the owner wrote it; the chain does not check it.
 
+## The news feed: what it covers
+
+`taoq news` and `taoq briefing` read the Fugal news feed (fugalai.com/feed/v1),
+which gathers these once for every bot, read-only and without logging in:
+
+- **Chain events** (finney, hourly): a subnet registered, replaced or
+  dissolved; identity, owner, emission split or mechanism changes; gamma on;
+  emission off; runtime upgrades. These are facts.
+- **Releases**: subtensor runtime releases; the `bittensor` and
+  `bittensor-cli` versions on PyPI; each subnet's GitHub releases and a daily
+  count of its commits (repository from its chain identity).
+- **Subnet blogs** that a subnet's website advertises as RSS or Atom.
+- **Talks and news headlines**: Novelty Search videos (titles); taodaily.io,
+  taonews.ai and taostats.io blog (title, date and link only).
+
+Not covered: **Discord chat** of any server (later, at most the published
+posts of announcement channels the owner follows), **X**, **Telegram**,
+tao.media, anything behind a login, and a subnet with no GitHub, site or
+feed in its identity. So "did anything happen on subnet N?" is answered
+"nothing reached the feed" when it lists nothing, never "nothing happened",
+and the bot says it cannot see Discord chat or X. Items are their sources'
+words (chain items are facts); give the source and the link. If the feed
+cannot be reached, `taoq` says so: say that, never guess.
+
 ## Part 1: for each question, where to look first
 
 | Question | First | Then | Notes |
@@ -16,8 +40,8 @@ self-declared: the owner wrote it; the chain does not check it.
 | Stake, positions, value, what unstaking returns | `taoq stake <coldkey>` | nothing else | Never estimate. |
 | A subnet's price, pool, emission, owner, registration cost, links | `taoq subnet <netuid>` | `taoq subnet-brief <netuid>` for validators and miners | `identity` gives GitHub, website, Discord, contact. |
 | A hotkey's standing, permit, pruning risk | `taoq hotkey <hotkey> [--netuid N]` | | |
-| What moved this week across Bittensor | `taoq week` | the shared feed (below) when it exists | |
-| What is new for subnets X, Y (releases, announcements) | GitHub releases of the subnet's repo (the link `taoq subnet` prints) | the subnet's own channels | A shared news feed is planned, not there yet. |
+| What moved this week across Bittensor | `taoq week` | `taoq news --since-hours 168` | |
+| What is new for subnets X, Y (releases, announcements, chain events) | `taoq news X Y --since-hours 168` (the Fugal news feed) | GitHub releases of the subnet's repo (the link `taoq subnet` prints), the subnet's own channels | What the feed covers: "The news feed" below. |
 | A subnet's code releases | `taoq subnet <n>` prints the GitHub API releases link; or `https://github.com/<owner>/<repo>/releases.atom` | `.../commits.atom` (noisy) | Unauthenticated GitHub API: 60 requests/hour per IP. The Atom feeds are lighter. |
 | How a mechanism works (emissions, staking, pruning, Gamma...) | PRIMER.md (this pack) | official docs as markdown: `https://www.bittensor.com/llms.mdx/docs/<slug>/content.md` (index: `https://www.bittensor.com/llms.txt`) | Docs pages are long: fetch one page, read the section you need. |
 | Exact chain rule, a parameter, an error message | `https://www.bittensor.com/catalog/reads.json`, `intents.json`, `errors.json` | source search: `https://www.bittensor.com/code/search.json?q=<literal>` | Primary. |
@@ -27,7 +51,7 @@ self-declared: the owner wrote it; the chain does not check it.
 | Ecosystem news | `https://taodaily.io/feed/`, `https://www.taonews.ai/rss.xml`, `https://taostats.io/blog/rss.xml` | | Opinion and AI-written stories (taonews says so). Give titles and links; do not republish articles. **Do not use tao.media content**: its terms forbid using it to "ground" an AI model. |
 | Subnet market data beyond taoq (history, volumes) | `https://api.taomarketcap.com/public/v1/...` (no key; 10 requests/min per IP) | taostats needs an API key (free tier 5 requests/min) | Prefer `taoq`; aggregators lag and can disagree with the chain. |
 | Who to contact about a subnet | `taoq subnet <n>` → `identity.contact`, `identity.discord`, `identity.url` | the subnet's GitHub README | Ask the user before sending anything to anyone. |
-| X (Twitter), Discord chat, Telegram chats | Not readable by the bot. | The shared feed may carry Discord announcements later. | Do not log in, scrape or automate a user account. See Part 2.6. |
+| X (Twitter), Discord chat, Telegram chats | Not readable by the bot. | The news feed may carry Discord announcement posts later (only published announcements, never chat). | Do not log in, scrape or automate a user account. See Part 2.6. |
 
 ## Part 2: evidence
 

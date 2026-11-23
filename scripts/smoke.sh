@@ -90,8 +90,9 @@ if [ "$BRAIN" = scripted ]; then
   export OWNER_WALLET_SS58=5GbydRVj98hQZvR2cf4t8WtcoUVjAuJykxxuqauiJpJqwB7m
   # The chain tool in the first conversation: live (finney) or fixture (no network).
   SMOKE_TAOQ=${SMOKE_TAOQ:-live}
-  export BRAIN_TAOQ_ENV=
-  [ "$SMOKE_TAOQ" = fixture ] && export BRAIN_TAOQ_ENV="TAOQ_FIXTURE=/tmp/taoq-fixture.json.gz TAOQ_ENDPOINTS=ws://127.0.0.1:9"
+  # The news in the briefing always comes from the recorded feed answers (first-conversation.sh writes them).
+  export BRAIN_TAOQ_ENV="TAOQ_FEED_FIXTURE=/tmp/taoq-feed.json"
+  [ "$SMOKE_TAOQ" = fixture ] && export BRAIN_TAOQ_ENV="$BRAIN_TAOQ_ENV TAOQ_FIXTURE=/tmp/taoq-fixture.json.gz TAOQ_ENDPOINTS=ws://127.0.0.1:9"
   export MODEL_INPUT=text MODEL_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false}}'
   export BACKGROUND_MODEL_USE=off TOOLS_DENY=
 fi
@@ -296,8 +297,8 @@ if [ "$SEED_TEST" = 1 ]; then
       check "new data directory: all five starter files were seeded" \
         bash -c '[[ "$0" == "IDENTITY.md=written, SOUL.md=written, USER.md=written, AGENTS.md=written, BOOTSTRAP.md=written" ]]' "$SEED_LOG"
       boot=$("${DC[@]}" exec -T bot cat /home/node/workspace/BOOTSTRAP.md 2>&1)
-      check "BOOTSTRAP.md: the first message opens with the bot's name and emoji, says it never asks for a seed phrase or private key, and offers the stake report for the wallet the owner signed in with" \
-        bash -c '[[ "$0" == *"Hi, I'"'"'m $1 $2, your own always-on agent, with my own computer and browser."* && "$0" == *"I'"'"'ll never ask for a seed phrase or private key. I only read public chain data."* && "$0" == *"Want a **daily stake report** for the wallet you signed in with? Tell me your time zone"* && "$0" != *"{{"* ]]' \
+      check "BOOTSTRAP.md: the first message opens with the bot's name and emoji, says it never asks for a seed phrase or private key, and offers the daily briefing for the wallet the owner signed in with" \
+        bash -c '[[ "$0" == *"Hi, I'"'"'m $1 $2, your own always-on agent, with my own computer and browser."* && "$0" == *"I'"'"'ll never ask for a seed phrase or private key. I only read public chain data."* && "$0" == *"Want a **daily briefing** for the wallet you signed in with: your stake, what changed on your subnets, and the day'"'"'s Bittensor news? Tell me your time zone"* && "$0" != *"{{"* ]]' \
         "$boot" "$BOT_DISPLAY_NAME" "$BOT_EMOJI"
       userfile=$("${DC[@]}" exec -T bot cat /home/node/workspace/USER.md 2>&1)
       greet=$(printf '%s' "$boot" | sed -n "/^Hi, I'm/,/^Or just tell me what you need\./p")

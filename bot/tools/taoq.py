@@ -9,8 +9,11 @@ prints one line of JSON (or, with --text, a short report for a person).
     taoq subnet <netuid>...         price, pool, emission, neurons, registration cost, owner, links
     taoq hotkey <hotkey> [--netuid N]   a miner's / validator's standing on each subnet, deregistration risk
     taoq hotkey|subnet ... --watch  the same, for a scheduled job: only what is new, worse or resolved
+                                    (subnet --watch --news: plus the shared feed's new items for those subnets)
     taoq week                       price movers, new subnets, emission changes over about 7 days
     taoq subnet-brief <netuid>      the on-chain facts for a deep dive on one subnet
+    taoq news [netuid...] [--mine <coldkey>]   releases, announcements, chain events, headlines (the shared feed)
+    taoq briefing <coldkey>         the daily briefing: stake report + what changed on its subnets + headlines
 
 Units (every output):
     TAO and alpha amounts are decimal numbers of whole TAO / whole alpha, exact
@@ -33,8 +36,11 @@ Environment:
     TAOQ_TIMEOUT     seconds per attempt (default 40); TAOQ_ROUNDS (default 2)
     TAOQ_FIXTURE     replay a recorded read instead of the network (tests, CI)
     TAOQ_RECORD      record every read of this run to that file
+    TAOQ_FEED_URL    the shared feed (default https://fugalai.com/feed/v1); TAOQ_FEED_TIMEOUT (default 10)
+    TAOQ_FEED_FIXTURE  replay a recorded feed answer (tests, CI); with TAOQ_FIXTURE alone the feed is not read
 
-Exit status: 0 ok, 1 the chain could not be read, 2 bad arguments.
+Exit status: 0 ok, 1 the chain could not be read, 2 bad arguments, 3 the news feed could not be reached
+(`taoq news` only: the briefing and `stake --text` go on without the news and say so).
 """
 
 from __future__ import annotations
@@ -802,8 +808,8 @@ def stake_text(o: dict) -> str:
     return "\n".join(lines)
 
 
-def cmd_stake(args):
-    ck = check_ss58(args.coldkey, "the coldkey")
+def stake_run(ck: str, args):
+    """(report, text function, raw reads): the stake report, with its snapshot saved unless --no-save."""
     reads, r = run_read(lambda rd: _stake_reads(rd, ck))
     t_now = now()
     path = os.path.join(data_dir(), f"stake-{ck}.json")
@@ -815,7 +821,20 @@ def cmd_stake(args):
         snaps.append(stake_snapshot(out, reads, t_now))
         save_json(path, {"version": VERSION, "coldkey": ck, "snapshots": snaps[-HISTORY_MAX:]})
     subnet_history_update(reads["subnets"], r.block, t_now, not args.no_save)
-    return out, stake_text
+    return out, stake_text, reads
+
+
+def cmd_stake(args):
+    ck = check_ss58(args.coldkey, "the coldkey")
+    out, text, reads = stake_run(ck, args)
+    if args.text and not args.no_news:
+        # Daily jobs made before the briefing existed run `taoq stake <address> --text`: they get the
+        # briefing's news sections too, but only when the feed answers; otherwise the report is as it was.
+        news = briefing_news(ck, _netuids_of_stake(reads), now(), not args.no_save)
+        if news.get("ok"):
+            out["news"] = news
+            return out, lambda o: stake_text(o) + "\n\n" + briefing_news_text(o["news"])
+    return out, text
 
 
 # ---- subnet ------------------------------------------------------------------------
@@ -991,11 +1010,35 @@ def cmd_subnet(args):
     prev = load_watch(path)
     releases = {it["netuid"]: fetch_releases(it["releases_api"]) for it in items if it.get("releases_api")}
     found, memo, unread = subnet_watch(items, reads["subnets"], releases, prev, Decimal(str(args.price_alert)))
+    if args.news:
+        subnet_watch_news(netuids, prev, found, memo, unread, t_now)
     diff = watch_diff(prev["alerts"] if prev else None, found, t_now)
     w = watch_output("subnet", {"netuids": netuids}, r.block, t_now, prev, diff, unread)
     if not args.no_save:
         save_watch(path, diff["stored"], memo, r.block, t_now)
     return w, lambda o: watch_text(o, "Subnet watch " + ", ".join(f"SN{n}" for n in netuids), text(out))
+
+
+def subnet_watch_news(netuids: list[int], prev: dict | None, found: dict, memo: dict, unread: list, t_now: float) -> None:
+    """`subnet --watch --news`: the feed's items for these subnets since the last check become events (info).
+    GitHub releases are left out (the watch reads them itself, fresher) and so is daily commit activity. The first
+    check only records the feed's cursor. An unreachable feed is named in `unread` and the cursor is kept."""
+    old = ((prev or {}).get("memo") or {}).get("news") or {}
+    try:
+        r = news_fetch(netuids, False, old.get("since") or iso(t_now - 86400), 40)
+    except FeedUnreachable:
+        unread.append("the news feed")
+        if old:
+            memo["news"] = old
+        return
+    shown = list(old.get("shown") or [])
+    seen = set(shown)
+    fresh = [it for it in r["items"] if _item_key(it) not in seen and it["k"] != "code"
+             and not (it["k"] == "release" and it["url"].startswith("https://github.com/"))]
+    if prev is not None:
+        for it in fresh:
+            found[f"news:{_item_key(it)}"] = {"severity": "info", "event": True, "text": _item_line(it, set(netuids))[2:]}
+    memo["news"] = {"since": r["now"] or iso(t_now), "shown": (shown + [_item_key(it) for it in fresh])[-NEWS_SHOWN_MAX:]}
 
 
 # ---- hotkey ------------------------------------------------------------------------
@@ -1355,6 +1398,317 @@ def cmd_brief(args):
     return out, text
 
 
+# ---- news: the shared feed ------------------------------------------------------------
+# The Fugal feed (fugalai.com/feed/v1) gathers releases, announcements, chain events and
+# news headlines once for every bot. taoq only reads it: GET /items, no login. Its items
+# are the sources' own words (chain items are facts); taoq never adds to them, and when the
+# feed cannot be reached it says so and shows nothing in their place.
+FEED_DEFAULT = "https://fugalai.com/feed/v1"
+NEWS_TEXT_MAX = 2400        # hard cap on `taoq news --text` (characters)
+BRIEF_SUBNETS_MAX = 1600    # the briefing's "your subnets" section
+BRIEF_NETWORK_MAX = 900     # the briefing's headlines
+NEWS_SHOWN_MAX = 400        # item keys remembered per cursor (the feed's `since` is inclusive)
+KIND_RANK = {"chain": 0, "runtime": 1, "release": 2, "announcement": 3, "blog": 4, "video": 5, "news": 6, "code": 7}
+KIND_WORD = {"chain": "chain", "runtime": "runtime", "release": "release", "announcement": "announcement",
+             "blog": "blog", "video": "video", "news": "news", "code": "code activity"}
+_CTRL = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]+")
+
+
+class FeedUnreachable(Exception):
+    """The news feed could not be read (network, HTTP error, not JSON, not ok)."""
+
+
+def feed_base() -> str:
+    base = (os.environ.get("TAOQ_FEED_URL") or FEED_DEFAULT).strip().rstrip("/")
+    if not base.startswith(("https://", "http://")):
+        raise Usage("TAOQ_FEED_URL must be an http(s) address like https://fugalai.com/feed/v1")
+    return base
+
+
+def feed_get(params: dict) -> dict:
+    """One GET of <feed>/items. Fixture mode: TAOQ_FEED_FIXTURE names a recorded answer, or
+    {"by_request": {"subnets": <answer>, "network": <answer>}} (a request with netuids gets the
+    first), or {"unreachable": "<why>"}; with only the chain fixture (TAOQ_FIXTURE) the feed is not read."""
+    from urllib.parse import urlencode  # noqa: PLC0415
+    base = feed_base()
+    url = f"{base}/items?{urlencode(params)}"
+    fx = os.environ.get("TAOQ_FEED_FIXTURE")
+    try:
+        if fx:
+            with open(fx, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and "unreachable" in data:
+                raise FeedUnreachable(str(data["unreachable"]))
+            if isinstance(data, dict) and "by_request" in data:    # {"subnets": answer, "network": answer}
+                data = data["by_request"].get("subnets" if "netuids" in params else "network")
+                if not isinstance(data, dict) or "unreachable" in data:
+                    raise FeedUnreachable(str((data or {}).get("unreachable", "no recorded answer")))
+        elif os.environ.get("TAOQ_FIXTURE"):
+            raise FeedUnreachable("not read in fixture mode")
+        else:
+            import urllib.error  # noqa: PLC0415
+            import urllib.request  # noqa: PLC0415
+            timeout = float(os.environ.get("TAOQ_FEED_TIMEOUT") or 10)
+            req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": f"taoq/{VERSION}"})
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (http(s) only, checked above)
+                    data = json.loads(resp.read(2_000_000))
+            except urllib.error.HTTPError as e:
+                why = f"HTTP {e.code}"
+                try:
+                    why += ": " + str(json.loads(e.read(20_000))["error"]["message"])[:160]
+                except (ValueError, KeyError, TypeError, OSError):
+                    pass
+                raise FeedUnreachable(why) from None
+    except FeedUnreachable:
+        raise
+    except (OSError, ValueError) as e:
+        raise FeedUnreachable(type(e).__name__ + (f": {e}"[:120] if str(e) else "")) from None
+    if not isinstance(data, dict) or data.get("ok") is not True or not isinstance(data.get("items"), list):
+        raise FeedUnreachable("the feed's answer was not the expected JSON")
+    return data
+
+
+def _clean(s, limit: int) -> str:
+    s = _CTRL.sub(" ", str(s or ""))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
+
+
+def _feed_item(x) -> dict | None:
+    """A feed item as taoq passes it on: the fields the API documents, one line each, cut short."""
+    if not isinstance(x, dict) or not x.get("title"):
+        return None
+    sn = sorted({int(n) for n in (x.get("sn") or []) if isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= 65535}) or [0]
+    url = str(x.get("url") or "")
+    url = url if url.startswith(("https://", "http://")) and len(url) <= 400 and not _CTRL.search(url) else ""
+    k = str(x.get("k") or "news")
+    return {"t": str(x.get("t") or "")[:20], "sn": sn, "k": k if k in KIND_RANK else "news",
+            "src": _clean(x.get("src"), 60), "title": _clean(x.get("title"), 200), "text": _clean(x.get("text"), 200), "url": url}
+
+
+def _item_key(it: dict) -> str:
+    return hashlib.sha256(f"{it['url']}|{it['title']}|{it['k']}".encode()).hexdigest()[:16]
+
+
+def _when(t: str) -> str:
+    try:
+        return time.strftime("%d %b %H:%M UTC", time.strptime(t, "%Y-%m-%dT%H:%M:%SZ")).lstrip("0")
+    except ValueError:
+        return t or "time unknown"
+
+
+SINCE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:\d{2})?)?")
+
+
+def _since_iso(args, cursor: dict | None, t_now: float) -> tuple[str, str]:
+    """(since, where it came from)."""
+    if getattr(args, "since", None):
+        if not SINCE_RE.fullmatch(args.since):
+            raise Usage("--since takes a UTC time like 2026-11-22T08:00:00Z")
+        return args.since, "asked"
+    if getattr(args, "since_hours", None) is not None:
+        return iso(t_now - float(args.since_hours) * 3600), "asked"
+    if cursor and cursor.get("since"):
+        return cursor["since"], "last time"
+    return iso(t_now - 86400), "24 hours"
+
+
+def news_cursor_path(key: str) -> str:
+    return os.path.join(data_dir(), f"news-{key}.json")
+
+
+def news_fetch(netuids: list[int], network: bool, since: str, limit: int) -> dict:
+    params = {"since": since, "limit": str(max(1, min(100, limit)))}
+    if netuids:
+        params["netuids"] = ",".join(str(n) for n in netuids[:40])
+    if network or not netuids:
+        params["network"] = "1"
+    r = feed_get(params)
+    items = [i for i in (_feed_item(x) for x in r["items"]) if i]
+    return {"since": str(r.get("since") or since), "now": str(r.get("now") or ""), "items": items, "more": bool(r.get("more")),
+            "not_covered": r.get("not_covered") if isinstance(r.get("not_covered"), dict) else {},
+            "failing": [{"src": _clean(f.get("src"), 60), "since": str(f.get("since") or "")[:20]}
+                        for f in (r.get("failing") or []) if isinstance(f, dict)][:10]}
+
+
+def _label(it: dict, asked: set) -> str:
+    mine = [n for n in it["sn"] if n in asked and n]
+    if mine:
+        return ", ".join(f"SN{n}" for n in mine)
+    subnets = [n for n in it["sn"] if n]
+    if it["k"] == "chain" and subnets:
+        return ", ".join(f"SN{n}" for n in subnets)
+    return "Network" if not subnets else ", ".join(f"SN{n}" for n in subnets)
+
+
+def _ordered(items: list) -> list:
+    # the feed's order is newest first; keep it within a kind, facts and releases before news
+    return sorted(items, key=lambda it: KIND_RANK.get(it["k"], 9))
+
+
+def _item_line(it: dict, asked: set) -> str:
+    line = f"- {_label(it, asked)} {KIND_WORD.get(it['k'], it['k'])}: {_clean(it['title'], 110)}"
+    if it["text"] and it["k"] not in ("news", "video"):
+        line += f" — {_clean(it['text'], 100)}"
+    line += f" ({it['src']}, {_when(it['t'])})"
+    return line + (f" {it['url']}" if it["url"] else "")
+
+
+def _capped(lines: list[str], cap: int, more_feed: bool) -> list[str]:
+    out, used = [], 0
+    for i, ln in enumerate(lines):
+        if used + len(ln) + 1 > cap:
+            out.append(f"- …and {len(lines) - i} more not shown here (ask me for them).")
+            return out
+        out.append(ln)
+        used += len(ln) + 1
+    if more_feed:
+        out.append("- …the feed had more; ask for fewer subnets or a shorter period.")
+    return out
+
+
+def coverage_line(not_covered: dict) -> str:
+    """What the feed cannot see, in one line: never Discord chat or X; GitHub for subnets without a known repository."""
+    no_repo = [f"SN{n}" for n, gaps in sorted(not_covered.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0)
+               if "github" in (gaps or [])]
+    line = "Not covered: Discord chat and X (the feed does not read them)"
+    return line + (f"; no GitHub repository known for {', '.join(no_repo)}" if no_repo else "") + "."
+
+
+def news_text(o: dict) -> str:
+    asked = set(o["netuids"])
+    who = (", ".join(f"SN{n}" for n in o["netuids"]) + (" and the network" if o["network"] else "")) if o["netuids"] else "the network"
+    if o.get("watch") and not o.get("alert"):
+        return NO_REPLY
+    lines = [f"Bittensor news for {who} since {_when(o['since'])} (from the Fugal feed; the sources' own words, chain items are facts):"]
+    if not o["items"]:
+        lines.append("- nothing new.")
+    else:
+        lines += _capped([_item_line(it, asked) for it in _ordered(o["items"])], NEWS_TEXT_MAX - 400, o["more"])
+    lines.append(coverage_line(o.get("not_covered") or {}))
+    if o.get("failing"):
+        lines.append("Feed sources not read lately: " + ", ".join(f"{f['src']} (since {f['since'][:10]})" for f in o["failing"][:4]) + ".")
+    text = "\n".join(lines)
+    return text if len(text) <= NEWS_TEXT_MAX else text[: NEWS_TEXT_MAX - 1] + "…"
+
+
+def _netuids_of_stake(reads: dict) -> list[int]:
+    return sorted({p["netuid"] for p in reads["positions"] if p["netuid"]})
+
+
+def cmd_news(args):
+    t_now = now()
+    netuids = list(dict.fromkeys(args.netuid + [int(x) for x in (args.netuids or "").split(",") if x.strip().isdigit()]))
+    if args.netuids and not all(x.strip().isdigit() for x in args.netuids.split(",") if x.strip()):
+        raise Usage("--netuids takes subnet numbers like 3,64")
+    network = args.network or not netuids or bool(args.mine)
+    key = "-".join(str(n) for n in netuids) or "network"
+    if args.mine:
+        ck = check_ss58(args.mine, "the coldkey")
+        reads, _ = run_read(lambda rd: _stake_reads(rd, ck))
+        netuids = list(dict.fromkeys(netuids + _netuids_of_stake(reads)))
+        key = f"mine-{ck}"
+    if len(netuids) > 40:
+        raise Usage("at most 40 subnets at a time")
+    if not 1 <= args.limit <= 100:
+        raise Usage("--limit takes 1 to 100")
+    if network and netuids:
+        key += "-net"
+    path = news_cursor_path(key)
+    cursor = load_json(path, None) if args.watch else None
+    since, since_from = _since_iso(args, cursor, t_now)
+    r = news_fetch(netuids, network, since, args.limit)
+    items = r["items"]
+    shown = list((cursor or {}).get("shown") or [])
+    if args.watch:
+        seen = set(shown)
+        items = [it for it in items if _item_key(it) not in seen]
+    out = {"ok": True, "command": "news", "feed": feed_base(), "netuids": netuids, "network": network, "since": r["since"],
+           "since_from": since_from, "now": r["now"], "items": items, "more": r["more"], "not_covered": r["not_covered"],
+           "failing": r["failing"],
+           "note": "items are their sources' own words (chain items are facts); the feed does not read Discord chat or X"}
+    if args.mine:
+        out["mine"] = args.mine
+    if args.watch:
+        out["watch"] = True
+        out["first_check"] = cursor is None
+        out["alert"] = bool(items)
+        if not args.no_save:
+            save_json(path, {"version": VERSION, "since": r["now"] or iso(t_now),
+                             "shown": (shown + [_item_key(it) for it in items])[-NEWS_SHOWN_MAX:]})
+    return out, news_text
+
+
+# ---- the daily briefing ----------------------------------------------------------------
+def briefing_news(coldkey: str, netuids: list[int], t_now: float, save: bool, since_hours=None) -> dict:
+    """What changed on these subnets and on the network since the last briefing (the cursor is
+    shared by `taoq briefing` and `taoq stake --text`). Never raises: {"ok": False, "error"} instead."""
+    path = news_cursor_path(f"briefing-{coldkey}")
+    cursor = load_json(path, None)
+    since, since_from = _since_iso(argparse.Namespace(since=None, since_hours=since_hours), cursor, t_now)
+    try:
+        mine = news_fetch(netuids, False, since, 40) if netuids else None
+        net = news_fetch([], True, since, 30)
+    except FeedUnreachable as e:
+        return {"ok": False, "error": f"the news feed could not be reached ({e})"}
+    seen = set((cursor or {}).get("shown") or [])
+    mine_items = [it for it in (mine or {}).get("items", []) if _item_key(it) not in seen]
+    mine_keys = {_item_key(it) for it in mine_items}
+    # headlines: the network's own items (runtime, SDK, talks, news, new or replaced subnets), not repeated from above
+    net_items = [it for it in net["items"] if _item_key(it) not in seen and _item_key(it) not in mine_keys and it["k"] != "code"]
+    out = {"ok": True, "feed": feed_base(), "since": (mine or net)["since"], "since_from": since_from, "now": net["now"],
+           "netuids": netuids, "subnets": mine_items, "network": net_items,
+           "more": bool((mine or {}).get("more")) or net["more"],
+           "not_covered": (mine or {}).get("not_covered") or {}, "failing": ((mine or {}).get("failing") or [])[:5]}
+    if save:
+        keys = list((cursor or {}).get("shown") or []) + [_item_key(it) for it in mine_items + net_items]
+        save_json(path, {"version": VERSION, "since": net["now"] or iso(t_now), "shown": keys[-NEWS_SHOWN_MAX:]})
+    return out
+
+
+def briefing_news_text(n: dict) -> str:
+    if not n.get("ok"):
+        return f"News: {n.get('error') or 'the news feed could not be reached'}; no news in this report rather than a guess."
+    asked = set(n["netuids"])
+    lines = []
+    if n["netuids"]:
+        lines.append(f"What changed on your subnets since {_when(n['since'])}:")
+        if n["subnets"]:
+            lines += _capped([_item_line(it, asked) for it in _ordered(n["subnets"])], BRIEF_SUBNETS_MAX, False)
+        else:
+            lines.append("- nothing new from the feed for " + ", ".join(f"SN{x}" for x in n["netuids"]) + ".")
+    lines.append("Bittensor headlines:")
+    if n["network"]:
+        lines += _capped([_item_line(it, asked) for it in _ordered(n["network"])], BRIEF_NETWORK_MAX, False)
+    else:
+        lines.append("- nothing new on the network.")
+    lines.append(coverage_line(n.get("not_covered") or {}))
+    return "\n".join(lines)
+
+
+def briefing_text(o: dict) -> str:
+    parts = []
+    st = o.get("stake")
+    if st is not None and st["positions"]:
+        parts.append(stake_text(st))
+    elif st is not None:
+        parts.append(f"Daily briefing for {short(o['coldkey'])}: no stake on this wallet yet "
+                     f"({fmt(st['totals']['free_tao'])} TAO free), so here is the network news.")
+    parts.append(briefing_news_text(o["news"]))
+    return "\n\n".join(parts)
+
+
+def cmd_briefing(args):
+    ck = check_ss58(args.coldkey, "the coldkey")
+    out, _, reads = stake_run(ck, args)
+    news = briefing_news(ck, _netuids_of_stake(reads), now(), not args.no_save, args.news_since_hours)
+    o = {"ok": True, "command": "briefing", "coldkey": ck, "block": out["block"], "at": out["at"], "stake": out,
+         "news": news, "usd": None,
+         "note": "no US dollar figures: the feed has no prices endpoint; amounts are TAO and alpha from the chain"}
+    return o, briefing_text
+
+
 # ---- main --------------------------------------------------------------------------
 WATCH_HELP = ("for a scheduled watch: report only what is new, worse or resolved since the last check "
               '("alert": false = nothing to tell; with --text the output is then exactly NO_REPLY); the first check records the state')
@@ -1376,12 +1730,32 @@ def build_parser():
     s.add_argument("--since-hours", type=float, default=20, help="compare with the newest snapshot at least this old (default 20)")
     s.add_argument("--price-alert", type=float, default=10, help="flag price moves of at least this many percent (default 10)")
     s.add_argument("--stale-blocks", type=int, default=None, help="flag validators that have not set weights for this many blocks (default 3 tempos)")
+    s.add_argument("--no-news", action="store_true", help="with --text: leave out the news sections (added only when the feed answers)")
     s.set_defaults(fn=cmd_stake)
+    s = common(sub.add_parser("briefing", help="the daily briefing: the stake report, what changed on the wallet's subnets, the network's headlines"))
+    s.add_argument("coldkey")
+    s.add_argument("--since-hours", type=float, default=20, help="stake: compare with the newest snapshot at least this old (default 20)")
+    s.add_argument("--price-alert", type=float, default=10, help="flag price moves of at least this many percent (default 10)")
+    s.add_argument("--stale-blocks", type=int, default=None, help=argparse.SUPPRESS)
+    s.add_argument("--news-since-hours", type=float, default=None, help="news from this many hours back instead of since the last briefing")
+    s.set_defaults(fn=cmd_briefing)
+    s = common(sub.add_parser("news", help="releases, announcements, chain events and headlines from the shared feed"))
+    s.add_argument("netuid", type=int, nargs="*", help="subnets (none: network-wide items only)")
+    s.add_argument("--netuids", default="", help="the same as a comma list: 3,64")
+    s.add_argument("--network", action="store_true", help="also network-wide items (always on with no netuids, or with --mine)")
+    s.add_argument("--mine", metavar="COLDKEY", help="the subnets this wallet holds stake in (read from the chain), plus network-wide items")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--since-hours", type=float, default=None, help="items from this many hours back (default 24)")
+    g.add_argument("--since", default=None, help="items since this UTC time, e.g. 2026-11-22T08:00:00Z")
+    s.add_argument("--limit", type=int, default=30, help="at most this many items (1-100, default 30)")
+    s.add_argument("--watch", action="store_true", help="for a scheduled job: only items not shown before (a cursor in $TAOQ_DATA_DIR); with --text exactly NO_REPLY when there are none")
+    s.set_defaults(fn=cmd_news)
     s = common(sub.add_parser("subnet", help="facts about one or more subnets"))
     s.add_argument("netuid", type=int, nargs="+")
     s.add_argument("--since-hours", type=float, default=20)
     s.add_argument("--watch", action="store_true", help=WATCH_HELP)
     s.add_argument("--price-alert", type=float, default=10, help="with --watch: a price move of at least this many percent since the last check is an event (default 10)")
+    s.add_argument("--news", action="store_true", help="with --watch: also the shared feed's new items for these subnets (announcements, blog posts, chain events)")
     s.set_defaults(fn=cmd_subnet)
     s = common(sub.add_parser("hotkey", help="a hotkey's standing on each subnet"))
     s.add_argument("hotkey")
@@ -1415,6 +1789,11 @@ def main(argv=None) -> int:
         print(dumps({"ok": False, "error": str(e)}))
         print(f"taoq: {e}", file=sys.stderr)
         return 1
+    except FeedUnreachable as e:
+        msg = f"the news feed ({feed_base()}) could not be reached: {e}"
+        print(f"News: {msg}. Nothing is shown rather than a guess." if args.text else dumps({"ok": False, "error": msg}))
+        print(f"taoq: {msg}", file=sys.stderr)
+        return 3
     print(text(out) if args.text else dumps(out))
     return 0
 

@@ -5,9 +5,12 @@
 #
 # The scripted model (scripts/scripted-brain) carries the conversation the way
 # bot/seed/BOOTSTRAP.md tells a real model to: the greeting (copied out of the
-# BOOTSTRAP.md OpenClaw put in front of it), one real `taoq stake` run in the
-# bot's shell, a schedule made with OpenClaw's own `automations` tool, the
-# notes, `rm` of BOOTSTRAP.md; then a forced run of that schedule.
+# BOOTSTRAP.md OpenClaw put in front of it), the briefing offer accepted, one
+# real `taoq briefing` run in the bot's shell (the chain live or recorded; the
+# news from the recorded feed answers in bot/tools/fixtures, as the brain's
+# BRAIN_TAOQ_ENV names TAOQ_FEED_FIXTURE=/tmp/taoq-feed.json), a schedule made
+# with OpenClaw's own `automations` tool, the notes, `rm` of BOOTSTRAP.md; then
+# a forced run of that schedule.
 #
 # The caller provides: chat <session-user> <message>, bot_sh <shell command>
 # (in the bot container, as the bot's user), brain_log, usage + a JSON getter
@@ -15,7 +18,7 @@
 #   FC_NAME FC_EMOJI FC_WALLET   what the bot was seeded with
 #   FC_TAOQ_MODE                 live (finney, network) | fixture (the recorded read
 #                                bot/tools/fixtures/finney.json.gz; no network)
-# In fixture mode the brain's BRAIN_TAOQ_ENV must be TAOQ_FIXTURE=/tmp/taoq-fixture.json.gz.
+# In fixture mode the brain's BRAIN_TAOQ_ENV must also name TAOQ_FIXTURE=/tmp/taoq-fixture.json.gz.
 
 fc_job() {   # the scheduled jobs, one JSON object per line
   bot_sh 'node -e '\''
@@ -63,8 +66,8 @@ first_messages() {
     reply=$(chat "$sess" "$ask")
     n1=$(brain_log | grep -a -c '\[brain\] -> ')
     echo "\"$ask\" ->"; printf '%s\n' "$reply" | sed 's/^/    /' | head -8
-    check "\"$ask\" as the first message: answered, the daily stake report offered in one line, no word about instruction files or reasoning" \
-      bash -c '[[ "$0" == *"daily stake report"* && "$0" != *SCRIPTED-BRAIN* ]] && ! grep -a -q -i -E "bootstrap|agents\.md|instruction|per my|I should" <<< "$0"' "$reply"
+    check "\"$ask\" as the first message: answered, the daily briefing offered in one line, no word about instruction files or reasoning" \
+      bash -c '[[ "$0" == *"daily briefing"* && "$0" != *SCRIPTED-BRAIN* ]] && ! grep -a -q -i -E "bootstrap|agents\.md|instruction|per my|I should" <<< "$0"' "$reply"
     check "\"$ask\": $calls model call(s) ($((n1 - n0)))" test "$((n1 - n0))" = "$calls"
   done
   check "BOOTSTRAP.md is still there after those first messages" bot_sh 'test -s /home/node/workspace/BOOTSTRAP.md'
@@ -75,6 +78,12 @@ first_conversation() {
   if [ "$FC_TAOQ_MODE" = fixture ]; then
     bot_sh 'cat > /tmp/taoq-fixture.json.gz' < bot/tools/fixtures/finney.json.gz
   fi
+  # The news: two real answers of the feed (recorded from the controller's feed/ service), one for the
+  # wallet's subnets and one for the network, as taoq's TAOQ_FEED_FIXTURE takes them.
+  python3 -I -c 'import json,sys
+print(json.dumps({"by_request": {"subnets": json.load(open(sys.argv[1])), "network": json.load(open(sys.argv[2]))}}))' \
+    bot/tools/fixtures/feed-sn70.json bot/tools/fixtures/feed-network.json | bot_sh 'cat > /tmp/taoq-feed.json'
+
   first_messages
   local boot reply want greeting u0 u1 u2 n0 n1 jobs job jid line
   boot=$(bot_sh 'cat /home/node/workspace/BOOTSTRAP.md')
@@ -84,7 +93,7 @@ print(f"""Hi, I'"'"'m {os.environ["FC_NAME"]} {os.environ["FC_EMOJI"]}, your own
 
 I'"'"'ll never ask for a seed phrase or private key. I only read public chain data.
 
-Want a **daily stake report** for the wallet you signed in with? Tell me your time zone and I'"'"'ll send it every morning.
+Want a **daily briefing** for the wallet you signed in with: your stake, what changed on your subnets, and the day'"'"'s Bittensor news? Tell me your time zone and I'"'"'ll send it every morning.
 
 I can also:
 - **watch a subnet** and alert you to big moves or new releases
@@ -106,33 +115,37 @@ m = re.search(r"(Hi, I.m .*?Or just tell me what you need\.)", sys.stdin.read(),
     bash -c '[[ "$0" != *"<"* && "$0" != *BOOTSTRAP* && "$0" != *nstruction* ]]' "$reply"
 
   n0=$(brain_log | grep -a -c '\[brain\] -> ')
-  reply=$(chat first-run "Yes please, the daily stake report. My time zone is America/New_York.")
+  reply=$(chat first-run "Yes please, the daily briefing. My time zone is America/New_York.")
   n1=$(brain_log | grep -a -c '\[brain\] -> ')
   u1=$(usage)
-  echo "reply:"; printf '%s\n' "$reply" | sed 's/^/    /' | head -12
-  check "the stake report came from a real taoq run in the bot's shell" \
-    bash -c '[[ "$0" == *"Stake report for"* && "$0" == *"TAO in all"* && "$0" == *"Scheduled: this report every day at 08:00 America/New_York"* ]]' "$reply"
-  check "the shell ran taoq for the owner's address" bash -c 'grep -a -q -- "-> exec .*taoq stake $1 --text" <<< "$0"' "$(brain_log)" "$FC_WALLET"
+  echo "reply:"; printf '%s\n' "$reply" | sed 's/^/    /' | head -24
+  check "the briefing came from a real taoq run in the bot's shell: the stake report, what changed on the wallet's subnets, the headlines" \
+    bash -c '[[ "$0" == *"Stake report for"* && "$0" == *"TAO in all"* && "$0" == *"What changed on your subnets since"* && "$0" == *"- SN70 release: "* && "$0" == *"Bittensor headlines:"* && "$0" == *"- Network runtime: Runtime 494"* && "$0" == *"Not covered: Discord chat and X"* && "$0" == *"Scheduled: this briefing every day at 08:00 America/New_York"* ]]' "$reply"
+  check "the shell ran taoq briefing for the owner's address, once" \
+    bash -c '[ "$(tail -n "$2" <<< "$0" | grep -a -c -- "-> exec .*taoq briefing $1 --text")" = 1 ]' "$(brain_log | grep -a '\[brain\] -> ')" "$FC_WALLET" "$((n1 - n0))"
   if [ "$FC_TAOQ_MODE" = live ]; then
     check "live read: a finalized finney block above 9,500,000 in the report" \
       bash -c '[[ "$0" =~ \(block\ ([0-9]+), ]] && [ "${BASH_REMATCH[1]}" -gt 9500000 ]' "$reply"
   fi
+  check "taoq kept the briefing's news cursor in the workspace (tomorrow: only what is new)" \
+    bot_sh "test -s /home/node/workspace/taoq/news-briefing-$FC_WALLET.json"
   check "taoq kept its snapshot in the workspace for tomorrow's comparison" \
     bot_sh "test -s /home/node/workspace/taoq/stake-$FC_WALLET.json"
   check "that turn took 4 model calls (taoq, schedule, notes, reply): $((n1 - n0))" test $((n1 - n0)) = 4
 
   jobs=$(fc_job)
-  job=$(grep -a '"name":"Daily stake report"' <<< "$jobs" | head -1)
+  job=$(grep -a '"name":"Daily briefing"' <<< "$jobs" | head -1)
   echo "scheduled jobs: $(grep -a -c '"id"' <<< "$jobs"); the new one: ${job:0:700}"
   jid=$(python3 -I -c 'import json,sys
 try: print(json.loads(sys.argv[1])["id"])
 except Exception: print("")' "$job")
-  check "OpenClaw's job table holds the job: cron 0 8 * * * America/New_York, isolated agent turn, light context, exec only, the taoq command" \
+  check "OpenClaw's job table holds the job: cron 0 8 * * * America/New_York, isolated agent turn, light context, exec only, the taoq briefing command" \
     python3 -I -c 'import json,sys
 j = json.loads(sys.argv[1]); job = j["job"]; p = job.get("payload", {}); s = job.get("schedule", {})
 ok = (j["enabled"] in (1, True) and s.get("kind") == "cron" and s.get("expr") == "0 8 * * *" and s.get("tz") == "America/New_York"
       and job.get("sessionTarget") == "isolated" and p.get("kind") == "agentTurn" and p.get("lightContext") is True
-      and p.get("toolsAllow") == ["exec"] and ("taoq stake " + sys.argv[2] + " --text") in p.get("message", ""))
+      and p.get("toolsAllow") == ["exec"] and ("Run exactly: taoq briefing " + sys.argv[2] + " --text.") in p.get("message", "")
+      and "numbers exactly as printed" in p.get("message", ""))
 sys.exit(0 if ok else 1)' "${job:-{\}}" "$FC_WALLET"
   echo "its delivery: $(python3 -I -c 'import json,sys
 try: print(json.dumps(json.loads(sys.argv[1])["job"].get("delivery")))
@@ -149,7 +162,7 @@ except Exception: print("?")' "$job"))" \
   step "the schedule runs (forced now through the automations tool; a scheduled run is the same)"
   n0=$(brain_log | grep -a -c 'cron-run step=')
   r0=$(fc_rows "Stake report for")
-  reply=$(chat first-run "Run the daily stake report now: job $jid")
+  reply=$(chat first-run "Run the daily briefing now: job $jid")
   echo "reply: ${reply:0:300}"
   check "the automations tool queued the run" bash -c '[[ "$0" == *"SCRIPTED-BRAIN RUN-NOW"* && "$0" == *enqueued* ]]' "$reply"
   # The run is queued and runs on its own; wait for its result in the job's state.
@@ -161,7 +174,7 @@ except Exception: print("?")' "$job"))" \
   sleep 2
   n1=$(brain_log | grep -a -c 'cron-run step=')
   u2=$(usage)
-  check "one scheduled report run = 2 model calls (one to run taoq, one to phrase the report): $((n1 - n0))" test $((n1 - n0)) = 2
+  check "one scheduled briefing run = 2 model calls (one to run taoq, one to phrase the briefing): $((n1 - n0))" test $((n1 - n0)) = 2
   r1=$(fc_rows "Stake report for")
   check "the run's report was delivered into the conversation that made the job (session rows with a stake report: $r0 -> $r1)" \
     test "${r1:-0}" -gt "${r0:-0}"

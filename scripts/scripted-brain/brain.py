@@ -19,14 +19,15 @@ What it answers, by the person's last message (OpenClaw's own trailing
   the first conversation (bot/seed/BOOTSTRAP.md in the system prompt; driven by
   scripts/first-conversation.sh):
        "What can you do?" (first message, BOOTSTRAP.md has the first-question rule)
-                                  -> the greeting's list + one line offering the report
+                                  -> the greeting's list + one line offering the briefing
        "What is the price of subnet N ..." (same) -> exec `taoq subnet N --text`, then
                                   its output + the one-line offer
        "Hi"                       -> the greeting, copied out of BOOTSTRAP.md
-       "... daily stake report ... <Area/City>" -> exec `taoq stake <address
+       "... daily briefing ... <Area/City>" -> exec `taoq briefing <address
             from the workspace files> --text`; automations add (the daily
-            job); exec (notes, rm BOOTSTRAP.md); the report + one line
-       "Run the daily stake report now: job <id>" -> automations run (forced)
+            job, its message copied out of the recipe in AGENTS.md); exec
+            (notes, rm BOOTSTRAP.md); the briefing + one line
+       "Run the daily briefing now: job <id>" -> automations run (forced)
        "Watch this hotkey for me: <hotkey> on subnet 70 ... <Area/City>" -> exec
             `taoq hotkey <hotkey> --netuid 70 --watch --text`; automations add
             (a SCRIPT job: the script is copied out of the recipe in AGENTS.md,
@@ -121,6 +122,9 @@ STAMP = re.compile(r"^\s*\[[^\]\n]{0,80}\]\s*")
 
 
 HOTKEY = re.compile(r"hotkey[^5]*?(5[1-9A-HJ-NP-Za-km-z]{46,48})")
+# The daily briefing recipe in AGENTS.md: Job "Daily briefing", expr `0 8 * * *` ..., message: `<message>`
+BRIEFING_JOB = re.compile(r'Job "Daily briefing", expr `0 8 \* \* \*`[^`]*?message: `(Run exactly: taoq briefing <address> --text\.[^`]*)`')
+OFFER = "Want a daily briefing for the wallet you signed in with: your stake, what changed on your subnets and the day's Bittensor news? Tell me your time zone."
 # "Open taostats.io and tell me what it shows for subnet 70"
 SITE_ASK = re.compile(r"(?i)\bopen ([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b.*?\bsubnet (\d{1,3})\b", re.S)
 # The script payload of the watch recipe in AGENTS.md: payload: {kind: "script", script: "<JSON string>"}
@@ -158,29 +162,29 @@ def first_conversation(ask, system, tools, results):
             return ("text", "SCRIPTED-BRAIN: no greeting found in BOOTSTRAP.md", None)
         lines = [l for l in g.group(1).splitlines() if l.startswith("- ")]
         return ("text", "I'm your own always-on agent with my own computer and browser. I can:\n"
-                        "- send you a **daily stake report**\n" + "\n".join(lines) +
-                        "\n\nWant a daily stake report for the wallet you signed in with? Tell me your time zone.", None)
+                        "- send you a **daily briefing**\n" + "\n".join(lines) + "\n\n" + OFFER, None)
     first_task = re.search(r"(?i)^what is the price of subnet (\d{1,3})", said)
     if first_question and first_task:
         if step == 0:
             return call_tool(tools, "exec", {"command": taoq_cmd(f"taoq subnet {first_task.group(1)} --text")})
-        return ("text", f"{text_of(results[0].get('content')).strip()}\n\n"
-                        "Want a daily stake report for the wallet you signed in with? Tell me your time zone.", None)
+        return ("text", f"{text_of(results[0].get('content')).strip()}\n\n" + OFFER, None)
     if "BOOTSTRAP.md" in system and said.lower().rstrip("!.") in ("hi", "hello", "hey"):
         g = GREETING.search(system)
         return ("text", g.group(1) if g else "SCRIPTED-BRAIN: no greeting found in BOOTSTRAP.md", None)
-    if "daily stake report" in ask.lower() and ZONE.search(ask):
+    if "daily briefing" in ask.lower() and ZONE.search(ask):
         addr = ADDRESS.search(system)
         if not addr:
             return ("text", "SCRIPTED-BRAIN: no address in the workspace files", None)
         addr, zone = addr.group(1), ZONE.search(ask).group(1)
-        report = f"taoq stake {addr} --text"
+        report = f"taoq briefing {addr} --text"
         if step == 0:
             return call_tool(tools, "exec", {"command": taoq_cmd(report)})
         if step == 1:
-            message = (f"Run exactly: {report}. Reply with its output unchanged, then at most one plain sentence about any "
-                       "line starting with \"!\". If it fails twice, reply only: Daily stake report: the chain could not be read this morning.")
-            job = {"name": "Daily stake report", "schedule": {"kind": "cron", "expr": "0 8 * * *", "tz": zone},
+            recipe = BRIEFING_JOB.search(system)
+            if not recipe:
+                return ("text", "SCRIPTED-BRAIN: no daily briefing recipe in the workspace files", None)
+            message = recipe.group(1).replace("<address>", addr)
+            job = {"name": "Daily briefing", "schedule": {"kind": "cron", "expr": "0 8 * * *", "tz": zone},
                    "sessionTarget": "isolated",
                    "payload": {"kind": "agentTurn", "lightContext": True, "toolsAllow": ["exec"], "timeoutSeconds": 300,
                                "message": message}}
@@ -188,12 +192,12 @@ def first_conversation(ask, system, tools, results):
         if step == 2:
             jid = JOB_ID.search(text_of(results[1].get("content")))
             jid = jid.group(0) if jid else "unknown"
-            cmd = (f"printf '%s\\n' '- Time zone: {zone}' '- Wants: daily stake report at 08:00' >> ~/workspace/USER.md && "
-                   f"printf '%s\\n' '# MEMORY.md' '- Job \"Daily stake report\" id {jid}, cron 0 8 * * * {zone}, command: {report}' "
+            cmd = (f"printf '%s\\n' '- Time zone: {zone}' '- Wants: daily briefing at 08:00' >> ~/workspace/USER.md && "
+                   f"printf '%s\\n' '# MEMORY.md' '- Job \"Daily briefing\" id {jid}, cron 0 8 * * * {zone}, command: {report}' "
                    f">> ~/workspace/MEMORY.md && rm -f ~/workspace/BOOTSTRAP.md && echo retired")
             return call_tool(tools, "exec", {"command": cmd})
         first = text_of(results[0].get("content"))
-        return ("text", f"{first.strip()}\n\nScheduled: this report every day at 08:00 {zone}. "
+        return ("text", f"{first.strip()}\n\nScheduled: this briefing every day at 08:00 {zone}. "
                         "Ask me to change or stop it.", None)
     if ask.lower().startswith("watch this hotkey") and HOTKEY.search(ask) and ZONE.search(ask):
         hk, zone = HOTKEY.search(ask).group(1), ZONE.search(ask).group(1)
@@ -210,7 +214,7 @@ def first_conversation(ask, system, tools, results):
             return call_tool(tools, "automations", {"action": "add", "job": job}, "cron")
         return ("text", f"{text_of(results[0].get('content')).strip()}\n\nScheduled: the hotkey watch every 6 hours. "
                         "Ask me to change or stop it.", None)
-    if ask.lower().startswith(("run the daily stake report now", "run the hotkey watch now")):
+    if ask.lower().startswith(("run the daily briefing now", "run the hotkey watch now")):
         jid = JOB_ID.search(ask)
         if step == 0 and jid:
             return call_tool(tools, "automations", {"action": "run", "jobId": jid.group(0), "runMode": "force",

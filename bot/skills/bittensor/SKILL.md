@@ -12,5 +12,6 @@ Read only what the question needs, never a whole file:
 - A term: `grep -i -m3 '^- \*\*<term>' {baseDir}/GLOSSARY.md`.
 - Fugal (SN70), Fugal Bot, and "what is subnet N": `cat {baseDir}/FUGAL.md` (short).
 - Where to look (docs, repos, which source to trust): `sed -n '/^## Part 1/,/^## Part 2/p' {baseDir}/SOURCES.md`.
+- What the news feed (`taoq news`, `taoq briefing`) covers and does not (asked "did anything happen on ..."): `sed -n '/^## The news feed/,/^## Part 1/p' {baseDir}/SOURCES.md`.
 
 Answer in plain words, short, with the figure's meaning; say when something is marked "Not verified". No investment advice or price predictions.

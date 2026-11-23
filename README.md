@@ -180,7 +180,7 @@ The suggestion buttons in an empty chat ("What can you do?", "Summarize my
 recent sessions", ...) are fixed strings in OpenClaw v2026.11.6's Control UI
 bundle (`dist/control-ui/assets`, one set per language); no setting changes
 them. `BOOTSTRAP.md` handles "What can you do?" as a first message: a short
-answer plus a one-line offer of the daily stake report.
+answer plus a one-line offer of the daily briefing.
 
 All optional; leave them unset and the bot behaves as before.
 
@@ -210,7 +210,8 @@ All optional; leave them unset and the bot behaves as before.
   - `BOOTSTRAP.md`, in a brand-new data directory only: the first
     conversation. The bot says who it is, that it will never ask for a seed
     phrase or private key and only reads public chain data, and offers a
-    daily stake report for the owner's wallet, then a subnet watch, a hotkey
+    daily briefing for the owner's wallet (stake, what changed on its subnets,
+    the day's Bittensor news, from `taoq briefing`), then a subnet watch, a hotkey
     watch or research.
     For each job it runs `taoq` once and shows the result, sets the job up
     as a schedule with OpenClaw's own scheduler (a report: an isolated run that

@@ -21,6 +21,8 @@ install packages or hand-write RPC, and to stop after two failures.
 | `taoq hotkey <hotkey> [--netuid N]` | each subnet where it is registered (all subnets scanned without `--netuid`): uid, active, validator permit, incentive, dividends, consensus, trust, validator trust, rank, emission per epoch and per day, stake, last weight-setting block, immunity, and a deregistration reading |
 | `taoq week` | price movers (top 5 up and down), emission share changes, new subnets (last 7 days), deregistered or replaced subnets, top subnets by emission; compared with a stored snapshot about 7 days old, else with the state 7 days ago from an archive node |
 | `taoq subnet-brief <netuid>` | the `subnet` facts plus the metagraph: validators with permit and how many set weights, miners earning incentive and from how many coldkeys, incentive concentration, top validators and miners, immune neurons, the next uid to be pruned |
+| `taoq news [<netuid>...] [--mine <coldkey>]` | not the chain: the shared Fugal feed (releases, announcements, chain events, news headlines) for those subnets, the wallet's subnets plus the network, or (no netuids) the network; below |
+| `taoq briefing <coldkey>` | the daily briefing in one run: the `stake` report, then what changed on the wallet's subnets since the last briefing, then the network's headlines; below |
 
 Options: `--text` (report for a person), `--no-save` (write no snapshot),
 `stake --since-hours H` (compare with the newest snapshot at least H hours
@@ -28,7 +30,10 @@ old, default 20; else the oldest snapshot at least an hour old),
 `stake --price-alert PCT` (default 10), `stake --stale-blocks N` (default 3
 tempos), `subnet --since-hours H`, `week --top N`, `week --no-archive`,
 `hotkey|subnet --watch` (below; `subnet --price-alert PCT` also sets the
-watch's threshold).
+watch's threshold; `subnet --watch --news` adds the feed's items), `stake
+--no-news` (with `--text`: no news sections), `news --since-hours H | --since
+ISO`, `news --limit N` (1 to 100, default 30), `news --watch`,
+`briefing --news-since-hours H`.
 
 Examples from finney (block 9568260, trimmed):
 
@@ -125,6 +130,90 @@ false`) the recipe falls back to an `agentTurn` that runs the command and
 replies `NO_REPLY` or the output unchanged: 2 calls per check. The container
 tests (`scripts/first-conversation.sh`) run exactly the recipe text from
 `AGENTS.md`: a quiet check and a delivered change, each with no model call.
+
+## News and the daily briefing
+
+The chain says nothing about releases, announcements or the week's stories.
+Those come from the **shared feed** (the controller's `feed/` service,
+`fugalai.com/feed/v1`, its reference in the controller repository's
+`docs/FEED.md`), which gathers them once for every bot. `taoq` only reads it:
+`GET /feed/v1/items`, no login, no key; `TAOQ_FEED_URL` changes the address.
+
+`taoq news` passes the feed's items on as they are, each cut to one line
+(control characters removed, links only if `http(s)`): `t` (published), `sn`
+(subnets; 0 is the network), `k` (`chain`, `runtime`, `release`,
+`announcement`, `blog`, `video`, `news`, `code`), `src`, `title`, `text` (at
+most 200 characters), `url`; plus the feed's `not_covered` and `failing`.
+Without `--watch` it reads a window (`--since-hours`, default 24);
+`--watch` keeps a cursor in `$TAOQ_DATA_DIR/news-<netuids>.json` (the feed's
+own clock, so nothing is missed) and the items already told, and with
+`--text` prints exactly `NO_REPLY` when nothing is new. `--text` is sized for
+a small model: one line per item, facts and releases before news and commit
+activity, **at most 2,400 characters** (the rest counted, "…and N more not
+shown here"), and one line on what the feed does not read (Discord chat, X).
+`--mine <coldkey>` asks the chain which subnets the wallet holds stake in and
+the feed for those plus the network.
+
+**The feed unreachable** (no answer, an HTTP error, a web page instead of
+JSON): `taoq news` says so plainly (`News: the news feed (...) could not be
+reached: HTTP 404. Nothing is shown rather than a guess.`) and exits **3**;
+nothing is invented.
+
+`taoq briefing <coldkey>` is the daily briefing as ONE command (JSON with
+`stake`, `news`, `usd: null`; or `--text`, ready to send):
+
+1. the `stake` report, unchanged (positions, value, change since yesterday split
+   into "from more alpha" and "from price moves", the `!` lines);
+2. "What changed on your subnets since <time>": the feed's items for the
+   subnets the wallet holds (two requests: those subnets; the network), only
+   what the last briefing did not show (`$TAOQ_DATA_DIR/news-briefing-<coldkey>.json`);
+   at most 1,600 characters;
+3. "Bittensor headlines": network items (runtime releases and upgrades, SDK
+   versions, new, replaced or dissolved subnets, Novelty Search, news
+   headlines), at most 900 characters; daily commit counts are left out here;
+4. one line on what the feed does not read.
+
+It degrades without failing: **no feed** gives the stake report and one line
+(`News: the news feed could not be reached (...); no news in this report
+rather than a guess.`), exit 0, and the cursor stays where it was; **no
+stake** gives one line (free balance) and the network headlines; the chain
+unreadable is exit 1 as for `stake`. **No US dollar figures**: the feed has no
+prices endpoint (the only no-key source found publishes no terms of use), so
+amounts stay in TAO and alpha from the chain.
+
+**Daily jobs made before the briefing** run `taoq stake <address> --text`:
+that command now appends sections 2 to 4 (sharing the briefing's cursor) when
+the feed answers, and prints exactly what it printed before when it does not.
+So existing bots get the news with no job edit, and nothing changes for them
+until the feed is live. (`taoq stake` without `--text`, the JSON the agent reads
+for questions, never reads the feed.)
+
+A real briefing, produced on 2026-11-23 with live finney and the feed run
+locally from the controller repository after one collection pass (no model):
+
+```
+$ taoq briefing 5GbydRVj98hQZvR2cf4t8WtcoUVjAuJykxxuqauiJpJqwB7m --text
+Stake report for 5GbydR…wB7m (block 9572135, 2026-11-23T21:35:27Z)
+- SN70 Fugal: 27,479.97 α × 0.003537 = 97.2062 TAO on your own hotkey 5E4x81…TL5U
+Total: 97.2062 TAO staked (at current prices; about 74.5917 TAO if unstaked now), 2.3535 TAO free, 99.5597 TAO in all.
+First report: changes will show from the next one.
+
+What changed on your subnets since 22 Nov 21:35 UTC:
+- SN70 release: Miner image image-v2026.11.22b (v0.7.0, protocol v4) — Approved entries image-v2026.11.22b network entry compose file finney f4be9383e31c6cc87707b2b01ace9… (github fugal-ai/fugal-subnet, 22 Nov 23:09 UTC) https://github.com/fugal-ai/fugal-subnet/releases/tag/image-v2026.11.22b
+- SN70 code activity: 5 commits on main — latest: Merge pull request #204 from fugal-ai/release/v0.7.0 (github fugal-ai/fugal-subnet (commits), 23 Nov 21:27 UTC) https://github.com/fugal-ai/fugal-subnet/commits/main
+Bittensor headlines:
+- Network runtime: Runtime 494 — Fix v493 stable Python floor check and runtime announcements by @UnArbosFive in #3351 Release v494… (github RaoFoundation/subtensor, 23 Nov 16:32 UTC) https://github.com/RaoFoundation/subtensor/releases/tag/v494
+- Network news: Bittensor Expands Subnet Limit to 160, Opening the Door for More AI Builders (news taodaily.io, 23 Nov 17:35 UTC) https://taodaily.io/bittensor-expands-subnet-limit-to-160-opening-the-door-for-more-ai-builders/
+- Network news: TPN-009 Wants to Make Google’s Gemma 4 Small Enough for Home Computers (news taodaily.io, 23 Nov 16:34 UTC) https://taodaily.io/tpn-009-wants-to-make-googles-gemma-4-small-enough-for-home-computers/
+- Network news: Which Bittensor Subnets Turn Customer Revenue Into Alpha Buybacks? (news taodaily.io, 23 Nov 15:06 UTC) https://taodaily.io/which-bittensor-subnets-turn-customer-revenue-into-alpha-buybacks/
+Not covered: Discord chat and X (the feed does not read them).
+```
+
+"Follow subnet N" is `taoq subnet N --watch --news --text` in a script job:
+the watch's own events plus the feed's new announcements, blog posts and chain
+events for N (GitHub releases come from the watch's own read, daily commit
+counts are left out), each told once; an unreachable feed is named only when
+something else is told.
 
 ## Units (every output)
 
@@ -236,7 +325,7 @@ for the image without it, measured on the same host).
   `HOSTED_TEST_TAOQ=fixture` / `SMOKE_TAOQ=fixture` replays the recorded read,
   no network). See below.
 
-## The first conversation and the daily report
+## The first conversation and the daily briefing
 
 `bot/seed/BOOTSTRAP.md` is written so that the first reply is the approved
 greeting and nothing else (no tool call either), without tags, and says that
@@ -254,11 +343,11 @@ Schedules use OpenClaw's own scheduler (the agent tool `automations`, alias
 `~/.openclaw/state/openclaw.sqlite`, shown on the Automations page):
 
 ```
-{action: "add", job: {name: "Daily stake report",
+{action: "add", job: {name: "Daily briefing",
   schedule: {kind: "cron", expr: "0 8 * * *", tz: "America/New_York"},
   sessionTarget: "isolated",
   payload: {kind: "agentTurn", lightContext: true, toolsAllow: ["exec"], timeoutSeconds: 300,
-            message: "Run exactly: taoq stake <address> --text. Reply with its output unchanged, ..."}}}
+            message: "Run exactly: taoq briefing <address> --text. Reply with its output unchanged, ..."}}}
 ```
 
 No `delivery` is given: OpenClaw stores `delivery: {mode: "announce"}` with the
@@ -273,20 +362,26 @@ the model.
 
 What the container test (`scripts/first-conversation.sh`) checks, with the
 scripted model doing what the file says: the greeting is the first reply,
-exactly; one `taoq stake` run in the bot's shell (live finney by default) and
-its report in the reply; the job in `cron_jobs` (cron `0 8 * * *`,
+exactly; the briefing offer accepted; one `taoq briefing` run in the bot's
+shell (live finney by default; the news from the recorded feed answers in
+`bot/tools/fixtures/feed-*.json`) and the whole briefing in the reply (stake,
+"What changed on your subnets", headlines); the job in `cron_jobs` (cron `0 8 * * *`,
 `America/New_York`, isolated, `agentTurn`, light context, `exec` only, the
-`taoq` command) with a next run time; `BOOTSTRAP.md` gone, `USER.md` and
+`taoq briefing` command and "numbers exactly as printed") with a next run time; `BOOTSTRAP.md` gone, `USER.md` and
 `MEMORY.md` written, `setup_completed_at` set; then `automations run` (forced)
 queues the job, the run takes exactly 2 model calls, finishes `ok`, and its
 report is delivered into the conversation that created the job
 (`lastDeliveryStatus: delivered`). The second turn takes 4 model calls
 (`taoq`, the job, the notes, the reply).
 
-**Cost of one daily report: 2 model calls.** The run is an isolated turn with
+**Cost of one daily briefing: 2 model calls** (one to run the tool, at most one
+to phrase it; the job's message says to reply with the output unchanged plus
+at most one sentence, with its numbers exactly as printed). The run is an isolated turn with
 `lightContext` (no workspace files in the prompt; a scheduled run never gets
-`BOOTSTRAP.md`) and only the `exec` tool: call 1 asks for `taoq stake ... --text`,
-call 2 writes the report from its output. The 6-hourly watches are
+`BOOTSTRAP.md`) and only the `exec` tool: call 1 asks for `taoq briefing ... --text`,
+call 2 writes the briefing from its output. (A script job would cost 0 calls
+but, on OpenClaw 2026.11.6, its first run after each gateway start fails once:
+acceptable for a 6-hourly watch, not for the one daily message.) The 6-hourly watches are
 script jobs (see "Watches" above) and make no model call at all, quiet or not.
 
 ## Real-model check (to run once, by someone with a key)
@@ -298,29 +393,32 @@ stake), in the web chat:
    Success: the reply is exactly the greeting, with the bot's name and emoji,
    nothing before or after it: no "BOOTSTRAP", no talk about instructions or
    files, no `<message>` tags. 1 model call.
-2. `Yes please, the daily stake report. My time zone is America/New_York.`
+2. `Yes please, the daily briefing. My time zone is America/New_York.`
    Success, in one turn and in about 4 to 6 model calls (one `taoq` run, the
    job through `dispatch_action`, the notes and `rm`, the reply): the reply
-   shows the `taoq` report (positions, totals, "First report: ...") and says
-   the report is scheduled every day at 08:00 America/New_York. Then check:
+   shows the `taoq briefing` output (positions, totals, "First report: ...",
+   what changed on the wallet's subnets, headlines, or the one-line note that
+   the feed could not be reached) with every number as printed, and says the
+   briefing is scheduled every day at 08:00 America/New_York. Then check:
    - the Automations page, or in the container
      `docker compose exec bot node -e 'const {DatabaseSync}=require("node:sqlite");console.log(new DatabaseSync("/home/node/.openclaw/state/openclaw.sqlite").prepare("select name, job_json from cron_jobs").all())'`:
-     "Daily stake report", `0 8 * * *`, `America/New_York`, `isolated`,
+     "Daily briefing", `0 8 * * *`, `America/New_York`, `isolated`,
      `agentTurn` with `lightContext`, `toolsAllow: ["exec"]` and the
-     `taoq stake <address> --text` command;
+     `taoq briefing <address> --text` command;
    - `~/workspace/BOOTSTRAP.md` is gone; `USER.md` has the time zone;
      `MEMORY.md` has the job;
    - the model proxy's `/usage` shows how many calls the turn took.
 3. On the Automations page, "Run now" on the job (or ask the bot: "Run the
-   daily stake report now"). Success: the report arrives in the same chat
+   daily briefing now"). Success: the report arrives in the same chat
    within a minute; the run itself takes 2 model calls (the asking turn,
    if used, 2 more).
 4. Failure signs to look for: any `pip`, `npm`, `curl` to an RPC endpoint or
    websocket code in the tool calls; more than one `taoq` run per request; the
    file left in place; a greeting that mentions its instructions.
 
-Optional: `Watch subnet 70 for me` (expect `taoq subnet 70 --watch --text` once
+Optional: `Follow subnet 70 for me` (expect `taoq subnet 70 --watch --news --text` once
 and a 6-hourly "Subnet watch" script job), `Watch hotkey <ss58> on subnet 70`
 (a "Hotkey watch" script job; later checks send nothing unless something
-changed), `What happened on Bittensor this week?` (`taoq week --text`, then
-a short brief).
+changed), `What happened on Bittensor this week?` (`taoq week --text; taoq news
+--since-hours 168 --text` in one run, then a short summary with links),
+`What's new on subnet 64?` (`taoq news 64 --since-hours 168 --text`).
