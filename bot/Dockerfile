@@ -85,7 +85,12 @@ USER node
 WORKDIR /home/node
 
 EXPOSE 18789 6080
-HEALTHCHECK --interval=10s --timeout=8s --start-period=300s --retries=6 \
+# A long start period: on a slow host (a sandbox room reading a freshly
+# unpacked image) a start has taken up to 621 s, and with the earlier 300 s
+# the container was reported "unhealthy" on its way to healthy. A check that
+# passes inside the period still marks it healthy at once, so a fast host
+# loses nothing.
+HEALTHCHECK --interval=10s --timeout=8s --start-period=900s --retries=6 \
   CMD ["/opt/fugal-bot/healthcheck.sh"]
 
 ENTRYPOINT ["tini", "-s", "--", "/opt/fugal-bot/entrypoint.sh"]
