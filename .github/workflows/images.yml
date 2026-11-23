@@ -1,6 +1,12 @@
-# Builds and publishes the three Fugal Bot images to GitHub Container Registry,
-# so hosts can pull them (BOT_IMAGE / GATE_IMAGE / PROXY_IMAGE) instead of
-# building. Images are traceable to the commit that built them.
+# Builds and publishes the four Fugal Bot images to GitHub Container Registry,
+# so hosts can pull them (BOT_IMAGE / MODELPROXY_IMAGE / GATE_IMAGE /
+# PROXY_IMAGE) instead of building. Images are traceable to the commit that
+# built them.
+#
+# It also packs the "room bundle", fugal-bot-room-<version>.tgz: the compose
+# files and an images.env with the four digest-pinned image references, which
+# is all a host needs besides its own .env. On a tag the bundle is attached to
+# the GitHub release of that tag; on every run it is a workflow artifact.
 name: images
 
 on:
@@ -10,17 +16,29 @@ on:
 
 permissions:
   contents: read
-  packages: write
+
+env:
+  REGISTRY: ghcr.io/fugal-ai
 
 jobs:
   images:
     runs-on: ubuntu-latest
-    env:
-      REGISTRY: ghcr.io/fugal-ai
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      bot: ${{ steps.bot.outputs.digest }}
+      modelproxy: ${{ steps.modelproxy.outputs.digest }}
+      gate: ${{ steps.gate.outputs.digest }}
+      proxy: ${{ steps.proxy.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # Stdlib only, loopback only: a fake model endpoint runs inside the test.
+      - name: Unit tests (model proxy)
+        run: python3 -I modelproxy/test_modelproxy.py
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -38,7 +56,7 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -eu
-          for img in fugal-bot fugal-bot-gate fugal-bot-proxy; do
+          for img in fugal-bot fugal-bot-modelproxy fugal-bot-gate fugal-bot-proxy; do
             tags="$REGISTRY/$img:$SHA"
             if [ "$REF_TYPE" = tag ]; then tags="$tags,$REGISTRY/$img:$REF_NAME"; fi
             key=$(echo "$img" | tr '-' '_')
@@ -57,6 +75,20 @@ jobs:
           build-args: |
             GIT_REVISION=${{ github.sha }}
             BUILD_DATE=${{ steps.meta.outputs.date }}
+
+      # The only image for two platforms: the same program is also the central
+      # gateway, which runs on an arm64 server; the room images stay amd64.
+      # Its Dockerfile has no RUN step (base image, COPY, metadata), so the
+      # arm64 variant is assembled without emulation. A RUN step added later
+      # would need QEMU set up before this step.
+      - name: Build and push fugal-bot-modelproxy (amd64 + arm64)
+        id: modelproxy
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: modelproxy
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.fugal_bot_modelproxy }}
 
       - name: Build and push fugal-bot-gate
         id: gate
@@ -86,6 +118,7 @@ jobs:
       - name: Digests for .env
         env:
           BOT: ${{ steps.bot.outputs.digest }}
+          MODELPROXY: ${{ steps.modelproxy.outputs.digest }}
           GATE: ${{ steps.gate.outputs.digest }}
           PROXY: ${{ steps.proxy.outputs.digest }}
           SHA: ${{ github.sha }}
@@ -95,7 +128,86 @@ jobs:
             echo
             echo '```'
             echo "BOT_IMAGE=$REGISTRY/fugal-bot@$BOT"
+            echo "MODELPROXY_IMAGE=$REGISTRY/fugal-bot-modelproxy@$MODELPROXY"
             echo "GATE_IMAGE=$REGISTRY/fugal-bot-gate@$GATE"
             echo "PROXY_IMAGE=$REGISTRY/fugal-bot-proxy@$PROXY"
             echo '```'
+            echo
+            echo "\`fugal-bot-modelproxy\` is one index for linux/amd64 and linux/arm64; the others are linux/amd64."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The room bundle. A separate job, so that only this one may write to the
+  # repository's releases (and it has no registry access).
+  bundle:
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pack fugal-bot-room-<version>.tgz
+        id: pack
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          BOT: ${{ needs.images.outputs.bot }}
+          MODELPROXY: ${{ needs.images.outputs.modelproxy }}
+          GATE: ${{ needs.images.outputs.gate }}
+          PROXY: ${{ needs.images.outputs.proxy }}
+        run: |
+          set -eu
+          if [ "$REF_TYPE" = tag ]; then version=$REF_NAME; else version="sha-$(echo "$SHA" | cut -c1-12)"; fi
+          mkdir bundle
+          {
+            echo "BOT_IMAGE=$REGISTRY/fugal-bot@$BOT"
+            echo "MODELPROXY_IMAGE=$REGISTRY/fugal-bot-modelproxy@$MODELPROXY"
+            echo "GATE_IMAGE=$REGISTRY/fugal-bot-gate@$GATE"
+            echo "PROXY_IMAGE=$REGISTRY/fugal-bot-proxy@$PROXY"
+          } > bundle/images.env
+          # Four lines, each pinned by a full sha256 digest, or no bundle at all.
+          test "$(grep -c -E '^[A-Z]+_IMAGE=ghcr\.io/[a-z0-9./-]+@sha256:[0-9a-f]{64}$' bundle/images.env)" = 4
+          cp compose.yaml compose.cathedral.yaml bundle/
+          # compose.hosted.yaml joins the bundle once it exists in the repository.
+          if [ -f compose.hosted.yaml ]; then cp compose.hosted.yaml bundle/; fi
+          name="fugal-bot-room-$version.tgz"
+          # Same commit, same digests -> the same archive, byte for byte.
+          # The files sit at the top level of the archive (no directory entry).
+          (cd bundle && tar --sort=name --owner=0 --group=0 --numeric-owner --mode=0644 \
+              --mtime="$(git log -1 --format=%cI)" -cf - -- *) | gzip -n -9 > "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Room bundle \`$name\`"
+            echo
+            echo '```'
+            tar -tzf "$name"
+            echo
+            sha256sum "$name"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: ${{ steps.pack.outputs.name }}
+          if-no-files-found: error
+
+      # `gh` is part of the runner image. An existing release for the tag is
+      # kept as it is; only the asset is added (or replaced on a re-run).
+      - name: Attach the bundle to the release of this tag
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          ASSET: ${{ steps.pack.outputs.name }}
+        run: |
+          set -eu
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "$TAG" \
+              --notes "Images and the room bundle built from tag $TAG. The image digests are in images.env inside $ASSET."
+          fi
+          gh release upload "$TAG" "$ASSET" --clobber
