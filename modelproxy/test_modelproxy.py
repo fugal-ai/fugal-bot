@@ -291,7 +291,7 @@ class Streaming(Base):
         self.assertEqual(data, sse(*events))  # exactly the stream a client without the option expects
         self.assertEqual(self.usage()["total"],
                          {"requests": 1, "prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18,
-                          "usd": 0.0, "estimated_requests": 0})
+                          "cached_prompt_tokens": 0, "usd": 0.0, "estimated_requests": 0})
 
     def test_include_usage_false_is_also_overridden_and_hidden(self):
         events = self.stream_reply()
@@ -525,6 +525,144 @@ class Metering(Base):
         self.assertEqual(mp.Config({**base, "BUDGET_TOKENS_PER_DAY": "0", "BUDGET_USD_TOTAL": ""}).limits(),
                          {"tokens_per_day": None, "tokens_total": None, "usd_per_day": None, "usd_total": None,
                           "requests_per_minute": None})
+
+
+
+def with_cache(cached, style="openai", prompt=1000, completion=100):
+    """A `usage` object in one of the shapes upstreams use for cached prompt tokens."""
+    u = {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
+    if style == "openai":
+        u["prompt_tokens_details"] = {"cached_tokens": cached}
+    elif style == "responses":
+        u = {"input_tokens": prompt, "output_tokens": completion,
+             "input_tokens_details": {"cached_tokens": cached}}
+    elif style == "deepseek":
+        u["prompt_cache_hit_tokens"] = cached
+        u["prompt_cache_miss_tokens"] = prompt - cached
+    elif style == "anthropic":
+        u["cache_read_input_tokens"] = cached
+    return u
+
+
+class CachedTokens(Base):
+    """Cached prompt tokens: read from `usage` in the shapes upstreams use, counted on their
+    own, and billed at the third price of the model's row (input price when there is none)."""
+    # per million: 1000 prompt (800 cached) + 100 completion at 100 in / 200 out / 10 cached
+    #   = (200 * 100 + 800 * 10 + 100 * 200) / 1e6 = 0.048 USD; without the cache price 0.12 USD
+    PRICES = '{"m": [100, 200, 10], "two": [100, 200], "*": [1, 1]}'
+
+    def reply_with(self, usage):
+        Upstream.reply = lambda h, req: h.send_bytes(200, completion(usage=usage))
+
+    def test_usage_tokens_reads_every_style(self):
+        for style in ("openai", "responses", "deepseek", "anthropic"):
+            self.assertEqual(mp.usage_tokens({"usage": with_cache(800, style)}), (1000, 100, 800), style)
+        self.assertEqual(mp.usage_tokens({"usage": {**with_cache(0, None), "cached_tokens": 5}}), (1000, 100, 5))
+        self.assertEqual(mp.usage_tokens({"response": {"usage": with_cache(300, "responses")}}), (1000, 100, 300))
+        self.assertEqual(mp.usage_tokens({"usage": USAGE}), (11, 7, 0))                  # nothing reported
+        self.assertEqual(mp.usage_tokens({"usage": {"total_tokens": 9}}), (9, 0, 0))
+        for bad in (-4, "800", 2.5, True, None, {}):                                     # unusable: 0
+            u = with_cache(0, None)
+            u["prompt_tokens_details"] = {"cached_tokens": bad}
+            self.assertEqual(mp.usage_tokens({"usage": u}), (1000, 100, 0), bad)
+        u = with_cache(0, None)
+        u["prompt_tokens_details"] = None
+        self.assertEqual(mp.usage_tokens({"usage": u}), (1000, 100, 0))
+        self.assertEqual(mp.usage_tokens({"usage": with_cache(5000, "openai")}), (1000, 100, 1000))  # capped
+
+    def test_cost_function(self):
+        c = mp.cost_usd
+        self.assertAlmostEqual(c((100, 200, 10), 1000, 100, 800), 0.048)
+        self.assertAlmostEqual(c((100, 200, 100), 1000, 100, 800), 0.12)
+        self.assertAlmostEqual(c((100, 200, 10), 1000, 100, 1000), 0.03)
+        self.assertAlmostEqual(c((100, 200, 10), 1000, 100, 9999), 0.03)    # more cached than prompt: all of it
+        self.assertAlmostEqual(c((100, 200, 10), 1000, 100, -5), 0.12)      # never a negative cached count
+        self.assertEqual(c((100, 200, 10), 0, 0, 50), 0.0)
+        self.assertGreaterEqual(c((100, 200, 10), -5, -5, 3), 0.0)
+        self.assertEqual(mp.price_of({"m": (1.0, 2.0)}, "m"), (1.0, 2.0, 1.0))      # no third value: input price
+        self.assertEqual(mp.price_of({"m": (1.0, 2.0, 0.1)}, "m"), (1.0, 2.0, 0.1))
+        self.assertEqual(mp.price_of({"a": (1.0, 2.0), "b": (5.0, 5.0, 0.5)}, "x"), (5.0, 5.0, 0.5))
+        self.assertEqual(mp.price_of({}, "m"), (0.0, 0.0, 0.0))
+
+    def test_price_rows_with_two_or_three_values(self):
+        self.assertEqual(mp.price_table({"a": [1, 2], "b": [1, 2, 0.5]}), {"a": (1.0, 2.0), "b": (1.0, 2.0, 0.5)})
+        for bad in ({"a": [1]}, {"a": [1, 2, 3, 4]}, {"a": [1, 2, -1]}, {"a": [1, 2, "x"]}, {"a": [1, 2, None]},
+                    {"a": [1, 2, True]}, {"a": [1, 2, float("inf")]}):
+            self.assertIsNone(mp.price_table(bad), bad)
+        with self.assertRaises(mp.ConfigError):
+            mp.Config({"MODEL_BASE_URL": "http://x/v1", "BUDGET_PRICES": '{"m": [1, 2, 3, 4]}',
+                       "MODELPROXY_DATA_DIR": self.tmp.name})
+
+    def test_room_json_reply_is_billed_at_the_cached_price(self):
+        self.start({"BUDGET_USD_PER_DAY": "10", "BUDGET_PRICES": self.PRICES})
+        self.reply_with(with_cache(800))
+        self.assertEqual(self.chat()[0].status, 200)
+        u = self.usage()
+        for row in (u["total"], u["day"], u["days"]["2026-11-22"]):
+            self.assertEqual((row["prompt_tokens"], row["cached_prompt_tokens"], row["completion_tokens"]),
+                             (1000, 800, 100))
+            self.assertAlmostEqual(row["usd"], 0.048)
+        self.assertTrue(any("cached=800" in line for line in LOGS))
+
+    def test_a_two_value_row_bills_cached_tokens_at_the_input_price(self):
+        self.start({"BUDGET_USD_PER_DAY": "10", "BUDGET_PRICES": self.PRICES})
+        self.reply_with(with_cache(800))
+        self.chat(model="two")           # the fake upstream ignores the model; the price comes from the request
+        u = self.usage()
+        self.assertEqual(u["total"]["cached_prompt_tokens"], 800)        # still counted
+        self.assertAlmostEqual(u["total"]["usd"], 0.12)
+
+    def test_room_stream_counts_cached_tokens(self):
+        self.start({"BUDGET_USD_PER_DAY": "10", "BUDGET_PRICES": self.PRICES})
+
+        def reply(h, req):
+            h.start_stream()
+            h.wfile.write(sse(chunk({"content": "hi"}), chunk({}, "stop"), done=False))
+            h.wfile.write(sse({"id": "c1", "object": "chat.completion.chunk", "choices": [],
+                               "usage": with_cache(800)}))
+        Upstream.reply = reply
+        _, data = self.chat(stream=True)
+        self.assertEqual(data, sse(chunk({"content": "hi"}), chunk({}, "stop")))   # usage chunk still hidden
+        t = self.usage()["total"]
+        self.assertEqual((t["cached_prompt_tokens"], t["prompt_tokens"]), (800, 1000))
+        self.assertAlmostEqual(t["usd"], 0.048)
+
+    def test_cached_tokens_stretch_the_usd_allowance(self):
+        self.start({"BUDGET_USD_PER_DAY": "0.1", "BUDGET_PRICES": self.PRICES})
+        self.reply_with(with_cache(800))
+        for _ in range(3):                       # 0.048 each: the third is still let in (0.096 < 0.1)
+            self.assertEqual(self.chat()[0].status, 200)
+        resp, data = self.chat()
+        self.assertEqual((resp.status, json.loads(data)["error"]["code"]), (400, "allowance_exhausted"))
+
+    def test_no_cache_info_bills_in_full_and_counts_zero(self):
+        self.start({"BUDGET_USD_PER_DAY": "10", "BUDGET_PRICES": self.PRICES})
+        self.reply_with(with_cache(0, None))
+        self.chat()
+        t = self.usage()["total"]
+        self.assertEqual(t["cached_prompt_tokens"], 0)
+        self.assertAlmostEqual(t["usd"], 0.12)
+
+    def test_cached_above_prompt_is_treated_as_the_whole_prompt(self):
+        self.start({"BUDGET_USD_PER_DAY": "10", "BUDGET_PRICES": self.PRICES})
+        self.reply_with(with_cache(5000))
+        self.chat()
+        t = self.usage()["total"]
+        self.assertEqual(t["cached_prompt_tokens"], 1000)
+        self.assertAlmostEqual(t["usd"], 0.03)
+
+    def test_an_old_usage_file_without_the_counter_still_loads(self):
+        old = {k: v for k, v in mp._zero().items() if k != "cached_prompt_tokens"}
+        old.update(requests=3, prompt_tokens=30, total_tokens=30, usd=0.5)
+        with open(os.path.join(self.tmp.name, "usage.json"), "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "total": old, "days": {"2026-11-22": old}}, f)
+        self.start({})
+        u = self.usage()
+        self.assertEqual((u["total"]["requests"], u["total"]["cached_prompt_tokens"], u["total"]["usd"]), (3, 0, 0.5))
+        self.assertEqual(u["day"]["cached_prompt_tokens"], 0)
+        self.reply_with(with_cache(800))
+        self.chat()
+        self.assertEqual(self.usage()["total"]["cached_prompt_tokens"], 800)
 
 
 class ExhaustedReply(Base):
@@ -1059,6 +1197,102 @@ class GatewayAllowance(GatewayBase):
             time.sleep(0.002)
         self.assertEqual(self.ask(self.BOB)[0].status, 200)
         self.assertEqual(self.report()["tenants"][self.BOB]["in_flight"], 0)
+
+
+
+class GatewayCachedTokens(GatewayBase):
+    # "m" bills cached input at a tenth; "plain" has two values; per call of 1000 prompt (800 cached) + 100 completion:
+    # m: (200 * 100 + 800 * 10 + 100 * 200) / 1e6 = 0.048 USD, plain: 0.12 USD
+    PRICES = {"m": [100, 200, 10], "plain": [100, 200], "big": [1000, 2000]}
+
+    def table(self, **over):
+        t = super().table(**over)
+        t["tenants"][0].update(usd_per_day=0.1, models=["m", "plain", "big"])
+        t["tenants"][1]["models"] = ["m", "plain"]
+        return t
+
+    def reply_with(self, usage):
+        Upstream.reply = lambda h, req: h.send_bytes(200, completion(usage=usage))
+
+    def test_three_value_rows_are_accepted_and_stored_as_given(self):
+        stored = json.loads(self.admin_call("GET", "/admin/tenants")[1])
+        self.assertEqual(stored["prices"], {"m": [100, 200, 10], "plain": [100, 200], "big": [1000, 2000]})
+        with open(os.path.join(self.tmp.name, "tenants.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["prices"]["plain"], [100, 200])       # two values stay two: older gateways can read it
+        for bad in ([1], [1, 2, 3, 4], [1, 2, -1], [1, 2, "x"], [1, 2, None]):
+            resp, data = self.admin_call("PUT", "/admin/tenants", self.table(prices={"m": bad, "plain": [1, 2], "big": [1, 2]}))
+            self.assertEqual(resp.status, 400, bad)
+            self.assertIn("prices", json.loads(data)["error"])
+        self.assertEqual(json.loads(self.admin_call("GET", "/admin/tenants")[1])["prices"]["m"], [100, 200, 10])
+
+    def test_cached_tokens_are_counted_per_tenant_and_platform_and_billed_at_the_cached_price(self):
+        self.reply_with(with_cache(800))
+        self.assertEqual(self.ask()[0].status, 200)
+        self.assertEqual(self.ask(self.BOB)[0].status, 200)
+        r = self.report()
+        for row in (r["tenants"][self.ALICE]["day"], r["tenants"][self.BOB]["day"]):
+            self.assertEqual((row["prompt_tokens"], row["cached_prompt_tokens"]), (1000, 800))
+            self.assertAlmostEqual(row["usd"], 0.048)
+        self.assertEqual(r["platform"]["day"]["cached_prompt_tokens"], 1600)
+        self.assertEqual(r["platform"]["days"]["2026-11-22"]["cached_prompt_tokens"], 1600)
+        self.assertEqual(r["tenants"][self.ALICE]["days"]["2026-11-22"]["cached_prompt_tokens"], 800)
+        self.assertAlmostEqual(r["platform"]["day"]["usd"], 0.096)
+        self.assertAlmostEqual(r["tenants"][self.ALICE]["remaining_usd"], 0.052)
+
+    def test_a_two_value_row_bills_cached_tokens_in_full(self):
+        self.reply_with(with_cache(800))
+        self.ask(model="plain")
+        day = self.report()["tenants"][self.ALICE]["day"]
+        self.assertEqual(day["cached_prompt_tokens"], 800)
+        self.assertAlmostEqual(day["usd"], 0.12)
+
+    def test_cached_tokens_stretch_the_allowance(self):
+        self.reply_with(with_cache(800))
+        self.assertEqual(self.ask()[0].status, 200)           # 0.048
+        self.assertEqual(self.ask()[0].status, 200)           # 0.096, under 0.1: one more is let in
+        self.assertEqual(self.ask()[0].status, 200)           # 0.144
+        self.assertEqual(self.code(self.ask()), (400, "allowance_exhausted"))
+        self.reply_with(with_cache(0, None))                  # without caching the same allowance ends after 1 call
+        self.now[0] += 86400
+        self.assertEqual(self.ask()[0].status, 200)
+        self.assertEqual(self.code(self.ask()), (400, "allowance_exhausted"))
+
+    def test_cached_above_prompt_is_capped_and_never_negative(self):
+        self.reply_with(with_cache(5000))
+        self.ask()
+        day = self.report()["tenants"][self.ALICE]["day"]
+        self.assertEqual(day["cached_prompt_tokens"], 1000)
+        self.assertAlmostEqual(day["usd"], 0.03)
+        self.assertGreaterEqual(day["usd"], 0)
+
+    def test_streamed_calls_count_cached_tokens_per_tenant(self):
+        def reply(h, req):
+            h.start_stream()
+            h.wfile.write(sse(chunk({"content": "hi"}), {"id": "c1", "object": "chat.completion.chunk",
+                                                          "choices": [], "usage": with_cache(800, "deepseek")}))
+        Upstream.reply = reply
+        _, data = self.ask(self.BOB, stream=True)
+        self.assertEqual(data, sse(chunk({"content": "hi"})))
+        day = self.report()["tenants"][self.BOB]["day"]
+        self.assertEqual((day["prompt_tokens"], day["cached_prompt_tokens"]), (1000, 800))
+        self.assertAlmostEqual(day["usd"], 0.048)
+
+    def test_cached_counters_survive_a_restart_and_old_day_files_load(self):
+        self.reply_with(with_cache(800))
+        self.ask()
+        self.start({})
+        self.assertEqual(self.report()["tenants"][self.ALICE]["day"]["cached_prompt_tokens"], 800)
+        path = os.path.join(self.tmp.name, "gateway-usage-2026-11-22.json")
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        for row in (data["platform"], *data["tenants"].values()):      # a file written before the counter existed
+            del row["cached_prompt_tokens"]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        self.start({})
+        r = self.report()
+        self.assertEqual((r["platform"]["day"]["requests"], r["platform"]["day"]["cached_prompt_tokens"]), (1, 0))
+        self.assertEqual(sorted(n for n in os.listdir(self.tmp.name) if ".unreadable" in n), [])
 
 
 class GatewayUpstream(GatewayBase):

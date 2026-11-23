@@ -29,10 +29,11 @@ services:
     cpus: 0.5
     pids_limit: 128
     healthcheck:
-      test: ["CMD", "python3", "-I", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9001/healthz',timeout=3)"]
-      interval: 5s
-      timeout: 5s
-      retries: 3
+      test: ["CMD", "python3", "-I", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9001/healthz',timeout=15)"]
+      interval: 10s
+      timeout: 20s
+      retries: 6
+      start_period: 120s
 
   # The bot's own model proxy: unchanged code, pointed at the gateway with the
   # bot's token. It is no longer on the scripted model's network.

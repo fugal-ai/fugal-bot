@@ -131,10 +131,15 @@ services:
     cpus: 0.5
     pids_limit: 128
     healthcheck:
-      test: ["CMD", "python3", "-I", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9001/healthz',timeout=3)"]
-      interval: 5s   # short: the bot waits for this service to be healthy
-      timeout: 5s
-      retries: 3
+      test: ["CMD", "python3", "-I", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9001/healthz',timeout=15)"]
+      # Tolerant on purpose: while the bot starts a small room is starved of CPU
+      # for minutes, and a 5 s timeout made this service show "unhealthy" in that
+      # time. The bot waits for it to be healthy (depends_on), and a start period
+      # does not count failures: the first passing check makes it healthy at once.
+      interval: 10s
+      timeout: 20s
+      retries: 6
+      start_period: 120s
 
   gate:
     <<: *hardening
