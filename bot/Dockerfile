@@ -41,12 +41,38 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && age --version && curl --version | head -1
 
+# The chain tool's libraries (tools/taoq.py: read-only Bittensor reports, no
+# wallet, no keys). A virtual environment on the image's own Python 3.13
+# (python3 is already here for websockify) with async-substrate-interface and
+# its four dependencies, every file pinned by sha256 (tools/requirements.txt,
+# made by `uv pip compile --generate-hashes`), wheels only. pip runs from its
+# own wheel, checked against a pinned sha256, and is not kept: the agent gets
+# no package installer. (Plain shell variables, not ARGs: a build argument
+# would show up in the environment check at the end of this stage.)
+COPY --chown=root:root tools/requirements.txt /opt/fugal-bot/tools/requirements.txt
+RUN pip_whl=/tmp/pip-26.3-py3-none-any.whl \
+ && pip_sha=f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13 \
+ && venv=/opt/fugal-bot/tools/venv \
+ && python3 -m venv --without-pip "$venv" \
+ && curl -fsSL --retry 3 -o "$pip_whl" https://files.pythonhosted.org/packages/07/25/ee8c38ae72d66b844ce8eb9711ba905dba21ca1a8a0c960057c41cd23337/pip-26.3-py3-none-any.whl \
+ && echo "$pip_sha  $pip_whl" | sha256sum -c - \
+ && "$venv/bin/python3" "$pip_whl/pip" install --no-cache-dir --disable-pip-version-check --no-input \
+      --require-hashes --only-binary :all: --no-deps -r /opt/fugal-bot/tools/requirements.txt \
+ && rm -f "$pip_whl" \
+ && find "$venv" -path '*/scalecodec/*' -name '*.c' -delete \
+ && "$venv/bin/python3" -m compileall -q -j 0 --invalidation-mode unchecked-hash "$venv/lib" \
+ && "$venv/bin/python3" -I -c 'import async_substrate_interface, scalecodec, websockets, xxhash' \
+ && ! "$venv/bin/python3" -I -c 'import pip' 2>/dev/null
+
 COPY --chown=root:root supervisord.conf /etc/fugal-bot/supervisord.conf
 COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs healthcheck.sh start-gateway.sh backup.sh restore.sh /opt/fugal-bot/
 COPY --chown=root:root seed/ /opt/fugal-bot/seed/
+COPY --chown=root:root tools/taoq.py /opt/fugal-bot/tools/taoq.py
 COPY --chown=root:root openbox-autostart /etc/xdg/openbox/autostart
-RUN chmod 0755 /opt/fugal-bot/*.sh /opt/fugal-bot/seed /etc/xdg/openbox/autostart \
- && chmod 0644 /opt/fugal-bot/*.mjs /opt/fugal-bot/seed/* /etc/fugal-bot/supervisord.conf
+RUN chmod 0755 /opt/fugal-bot/*.sh /opt/fugal-bot/seed /etc/xdg/openbox/autostart /opt/fugal-bot/tools/taoq.py \
+ && chmod 0644 /opt/fugal-bot/*.mjs /opt/fugal-bot/seed/* /etc/fugal-bot/supervisord.conf /opt/fugal-bot/tools/requirements.txt \
+ && ln -sf /opt/fugal-bot/tools/taoq.py /usr/local/bin/taoq \
+ && TAOQ_ENDPOINTS=ws://127.0.0.1:9 taoq --version
 
 # Left out of the image: the Codex command-line program's binary (404 MB in
 # one platform package, linux-x64 or linux-arm64). It is the runtime behind

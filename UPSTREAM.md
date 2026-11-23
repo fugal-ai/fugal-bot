@@ -128,6 +128,7 @@ is reproducible by us, not only pinned.
 | supervisor | process manager | Debian trixie package | BSD-style (Repoze) |
 | age 1.2.1 | encrypting backups to a public key | Debian trixie package | BSD-3-Clause |
 | curl | uploading and downloading backups | in the OpenClaw image (Debian trixie package) | curl licence (MIT-style) |
+| async-substrate-interface 2.2.1, cyscale 0.8.0, websockets 17.4, xxhash 4.1.0, aiosqlite 0.22.1 | the chain tool `taoq` (a virtual environment on the image's Python 3.13) | wheels pinned by sha256 in `bot/tools/requirements.txt`; pip 26.3 runs from its wheel (sha256 in `bot/Dockerfile`) and is not kept | MIT, Apache-2.0, BSD-3-Clause, BSD-2-Clause, MIT |
 
 The Debian packages are installed with `apt-get` during the build and are not
 yet pinned to a snapshot date (see `SECURITY-NOTES.md`, gaps). Their licence
