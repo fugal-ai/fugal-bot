@@ -3,9 +3,10 @@
 # PROXY_IMAGE) instead of building. Images are traceable to the commit that
 # built them.
 #
-# It also packs the "room bundle", fugal-bot-room-<version>.tgz: the compose
-# files and an images.env with the four digest-pinned image references, which
-# is all a host needs besides its own .env. On a tag the bundle is attached to
+# It also packs the "room bundle", fugal-bot-room-<version>.tgz: compose.yaml,
+# compose.cathedral.yaml, compose.hosted.yaml and an images.env with the four
+# digest-pinned image references, which is all a host needs besides its own
+# .env (no source tree: nothing is built there). On a tag the bundle is attached to
 # the GitHub release of that tag; on every run it is a workflow artifact.
 name: images
 
@@ -176,6 +177,14 @@ jobs:
           # Four lines, each pinned by a full sha256 digest, or no bundle at all.
           test "$(grep -c -E '^[A-Z]+_IMAGE=ghcr\.io/[a-z0-9./-]+@sha256:[0-9a-f]{64}$' bundle/images.env)" = 4
           cp compose.yaml compose.cathedral.yaml compose.hosted.yaml bundle/
+          # The bundle must stand alone: compose reads these files, with the
+          # hosted profile and both one-shots, from a directory that holds
+          # nothing else. Made-up values; nothing is pulled or started.
+          (cd bundle && env COMPOSE_FILE=compose.yaml:compose.cathedral.yaml:compose.hosted.yaml COMPOSE_PROFILES=hosted \
+              DATA_DIR=/workspace/fugal-bot-data ACCESS_PASSWORD=check-only-not-a-secret-0123456789abcdef \
+              MODEL_BASE_URL=https://model.invalid/v1 MODEL_NAME=check-only TUNNEL_TOKEN=check-only \
+              docker compose --env-file images.env --profile backup --profile restore config --quiet)
+          test "$(ls bundle | tr '\n' ' ')" = "compose.cathedral.yaml compose.hosted.yaml compose.yaml images.env "
           name="fugal-bot-room-$version.tgz"
           # Same commit, same digests -> the same archive, byte for byte.
           # The files sit at the top level of the archive (no directory entry).

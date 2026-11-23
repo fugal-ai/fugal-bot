@@ -240,7 +240,11 @@ image (about 1 GB) and the desktop and Chromium packages, typically several
 minutes on a fresh machine; later starts reuse the image. To skip building,
 set `BOT_IMAGE`, `MODELPROXY_IMAGE`, `GATE_IMAGE` and `PROXY_IMAGE` to
 published, digest-pinned images and run `docker compose pull` then
-`docker compose up -d --no-build` (none is published yet).
+`docker compose up -d --no-build`. The `images` workflow publishes them to
+`ghcr.io/fugal-ai` (`fugal-bot`, `fugal-bot-modelproxy`, `fugal-bot-gate`,
+`fugal-bot-proxy`); the four lines with their digests are in the summary of
+each workflow run and in `images.env` inside `fugal-bot-room-<version>.tgz`,
+which is attached to each release and to each run.
 
 ## Login page
 
@@ -375,6 +379,11 @@ data directory, then unpacks it and prints one line of JSON. At the next
 start the bot has its conversations and files back, and the first-run script
 does not run again. The key file is needed for that one command only.
 
+A hosted bot (`compose.hosted.yaml`) has the same two scripts as one-shot
+services, `docker compose run --rm -T backup` and `docker compose run --rm -T
+restore`; `docs/CATHEDRAL.md`, "Controller contract", lists every command
+with its input, output and exit status.
+
 ## Smoke test
 
 `scripts/smoke.sh [--fresh] [--keep]` builds and runs a separate copy (project
@@ -414,13 +423,27 @@ supplied with `SMOKE_SECRETS_FILE=<env file>`. Unit tests (stdlib only):
 agent, the bot's model proxy, a second model proxy in gateway mode, the
 scripted model (`docs/MODELPROXY.md`).
 
+`scripts/hosted-test.sh` runs a hosted bot the way a site's controller does:
+from a directory that holds only the three compose files of the room bundle
+and a `.env`, with `GATE_SSO=on` and every service in one network namespace.
+It signs in with a one-time token, chats through the bot's model proxy,
+checks the name, emoji and accent colour inside a frame on a stand-in for the
+site's page, the starter files, the desktop and who may frame the bot; then
+it takes a hot backup, stops the bot, takes a cold backup through the
+`backup` service, removes the stack and deletes the data directory, restores
+through the `restore` service, starts again, and checks that a file and a
+conversation from before the backup are back. The named tunnel is not run
+there (it needs a real Cloudflare token); its definition is checked with
+`docker compose config`.
+
 ## Layout
 
 ```
 compose.yaml           the bot: bot, modelproxy, gate, proxy, volume-init (+ tunnel profile)
 compose.datadir.yaml   optional: data in a host directory (DATA_DIR)
 compose.cathedral.yaml optional: every service on the host network (hosts without container NAT)
-compose.hosted.yaml    optional, on top of the above: named tunnel, backup one-shot (profile "hosted")
+compose.hosted.yaml    optional, on top of the above: named tunnel (profile "hosted"),
+                       backup and restore one-shots
 bot/                   OpenClaw image + desktop, browser, config renderer,
                        starter files (seed/), backup.sh and restore.sh
 modelproxy/            holds the model key, meters tokens, enforces the budget; also the
@@ -428,9 +451,11 @@ modelproxy/            holds the model key, meters tokens, enforces the budget; 
 gate/                  password login with rate limiting, or sign-in by one-time token
                        from a site's page (Python stdlib)
 proxy/                 Caddy: the one port, TLS, routes to chat and desktop
-scripts/               smoke test, gateway chain test and their test-only scripted model
+scripts/               smoke test, gateway chain test, hosted test and their test-only
+                       scripted model
 docs/                  CATHEDRAL.md (sandbox rooms), MODELPROXY.md (the model proxy's two roles)
-.github/workflows/     images.yml: CI publishes the four images to ghcr.io (tags v*, manual)
+.github/workflows/     images.yml: CI publishes the four images to ghcr.io and packs the
+                       room bundle (tags v*, manual)
 UPSTREAM.md            pinned upstream, licences, what was changed
 SECURITY-NOTES.md      what is disabled, what the agent can reach, gaps
 NEXT.md                what is still missing; open questions

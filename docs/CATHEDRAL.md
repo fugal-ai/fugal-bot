@@ -114,12 +114,22 @@ docker compose --profile tunnel up -d --no-build
 `pull` fetches the published images even though the services also have a
 build section; `--no-build` guarantees nothing is built. Without
 `--no-build`, compose still builds nothing as long as the images are present.
-Nothing is published yet.
+
+The images are published by the `images` workflow to `ghcr.io/fugal-ai`
+(`fugal-bot`, `fugal-bot-modelproxy`, `fugal-bot-gate`, `fugal-bot-proxy`),
+tagged with the commit they were built from and, for a release, with its tag.
+Three places give the digests: the summary of the workflow run, `images.env`
+in the bundle, and the registry itself, for example
+`docker buildx imagetools inspect ghcr.io/fugal-ai/fugal-bot:<commit or tag>`.
+With the bundle a room needs no copy of this repository: the three compose
+files, the four lines of `images.env` and your own settings in `.env` are
+enough (`scripts/hosted-test.sh` starts a bot from exactly that).
 
 **Starting: never `up --wait`.** In real rooms a start took between 276 and
 621 seconds, and when it takes more than about 6 minutes Docker reports the
 bot as `unhealthy` for a while before it turns `healthy` by itself (the
-image's health check allows a 300-second start period and then six tries).
+health check of the images published up to 2026-11-22 allows a 300-second
+start period and then six tries; later images allow 900 seconds).
 `up --wait` gives up at that first `unhealthy`. Run `up -d`, which returns at
 once, and then poll until the bot is healthy, with a long deadline (20
 minutes) and treating `unhealthy` as "not yet":
@@ -153,7 +163,9 @@ off-site backup (section 4).
 `/workspace` is best effort and a room is replaced every day, so take a
 backup before each replacement and keep it somewhere else. The scripts are in
 the bot image (`README.md`, "Back up and restore"; what a backup holds and
-who can read it: `SECURITY-NOTES.md`). Both read a presigned URL from
+who can read it: `SECURITY-NOTES.md`). This section is for a bot you run
+yourself with the two files above; a hosted bot has one-shot services for the
+same two scripts ("Controller contract" below). Both read a presigned URL from
 standard input, so send it as the exec call's input, not inside the command:
 commands are kept in Cathedral's exec logs, input is not part of the command
 line. Working directory `/workspace/app`.
@@ -261,29 +273,144 @@ What the profile does:
   frame out with `POST https://<bot host>/_gate/logout` (credentials
   included). Only `GATE_PARENT_ORIGIN` may frame the bot. Details and limits:
   `SECURITY-NOTES.md`, "Hosted mode".
-- **`backup`** is a one-shot that `up` never starts. It runs
-  `/opt/fugal-bot/backup.sh cold` from the bot image with `DATA_DIR/home`
-  mounted read-only, reads the upload address (a presigned URL) as one line
-  on standard input, and encrypts to `BACKUP_AGE_RECIPIENT`:
-
-  ```
-  docker compose stop bot
-  docker compose run --rm -T backup < url.txt
-  docker compose start bot
-  ```
-
-  It needs a bot image that contains `backup.sh`.
+- **`backup`** and **`restore`** are one-shots that `up` never starts. They
+  run `backup.sh cold` and `restore.sh` from the bot image as the bot's user.
+  The commands, their input, output and exit codes are in "Controller
+  contract" below.
 
 Tested: the three files together with Compose 2.33.0 and dummy values
 (`docker compose config`; with the profile the services are `volume-init`,
 `bot`, `modelproxy`, `gate`, `proxy`, `tunnel`); cloudflared's flags and its
 metrics address without a network connection; the sign-in, the framing rules
 and the cookie in `scripts/smoke.sh`, in both layouts, behind a stand-in for
-the site and for Cloudflare. A named tunnel was run in a real room by hand with the
-same command minus `--metrics` (it connects under gVisor with `--protocol
-http2`; the token was not found on the metrics port). **Not run:** this
-overlay's `tunnel` service itself (it needs a real Cloudflare token), the
-`backup` service, and the sign-in in a real room.
+the site and for Cloudflare; and the whole hosted set of files, started from a
+directory that holds nothing but the bundle and a `.env`, in
+`scripts/hosted-test.sh` (sign-in, chat, name and colour in the frame,
+desktop, hot and cold backup, the data directory deleted, restore, start). A
+named tunnel was run in a real room by hand with the same command minus
+`--metrics` (it connects under gVisor with `--protocol http2`; the token was
+not found on the metrics port). **Not run:** this overlay's `tunnel` service
+itself (it needs a real Cloudflare token; only its definition is checked),
+and the sign-in, `backup` and `restore` in a real room.
+
+## Controller contract
+
+What a site's controller can rely on when it runs a hosted bot. Everything
+here except the tunnel is exercised by `scripts/hosted-test.sh`.
+
+**The app directory** holds the three compose files from
+`fugal-bot-room-<version>.tgz` and one `.env` (mode 600): the bot's settings
+(`.env.example`, "hosted mode", lists them all) followed by the four lines of
+`images.env`. Nothing else: no source tree, nothing is built. Every command
+below runs with the app directory as its working directory. Put it under
+`/work` (for example `/work/app`) and the secrets in `.env` go when the room
+goes; `DATA_DIR` is on `/workspace`.
+
+Compose reads the whole of `.env` for every command, the one-shots included,
+and refuses to go on when one of `DATA_DIR`, `ACCESS_PASSWORD`,
+`MODEL_BASE_URL`, `MODEL_NAME` or `TUNNEL_TOKEN` is missing or empty. So the
+file has to be complete before the first command, and stay in place for a
+backup or a restore.
+
+**Services.** `docker compose up` with `COMPOSE_PROFILES=hosted` starts
+`volume-init` (a one-shot that lays out `DATA_DIR` and exits 0), `modelproxy`,
+`gate`, `proxy`, `bot` and `tunnel`. `backup` and `restore` are one-shots
+that only `docker compose run` starts. `tunnel-guard` and `tunnel-url` belong
+to the quick tunnel and never start here.
+
+**Start, stop, change.**
+
+```
+docker compose pull                    # the four images, the helper image, cloudflared
+docker compose up -d --no-build        # returns in seconds; does not wait for the bot
+docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q bot)"
+                                       # poll: "starting" and "unhealthy" mean not yet,
+                                       # "healthy" means ready; allow 20 minutes
+docker compose stop bot                # the agent only; up to 45 s
+docker compose start bot
+docker compose down                    # everything; the data stays in DATA_DIR
+```
+
+To change a setting, rewrite `.env` and run `docker compose up -d --no-build`
+again: only the services whose settings changed are replaced.
+
+**Sign-in** is described under "Hosted mode" above: the token
+`v1.<bot_id>.<exp>.<jti>.<mac>` goes in the form field `token` of a POST to
+`https://<bot host>/_gate/sso`, with `next`; the answer is 303 and the cookie
+`__Host-pb_session`, or 403.
+
+**Backups and restore.** Each command reads exactly one line on standard
+input, the presigned URL (`https://` only, at most 8192 characters), and
+never takes it as an argument: commands are kept in exec logs, their input is
+not. The URL is not printed, not even in an error.
+
+```
+# hot: while the bot runs
+docker compose exec -T bot /opt/fugal-bot/backup.sh hot       < the PUT URL
+
+# cold: with the bot stopped, for example before the room is replaced
+docker compose stop bot
+docker compose run --rm -T backup                             < the PUT URL
+docker compose start bot
+
+# restore: the bot stopped; DATA_DIR empty or missing
+#   the age identity, as a file readable by uid 1000, for this one run:
+sh -c 'umask 077 && rm -rf /work/restore && mkdir -p /work/restore \
+       && cat > /work/restore/identity.txt \
+       && chown 1000:1000 /work/restore/identity.txt'         < the identity
+docker compose run --rm -T restore                            < the GET URL
+rm -f /work/restore/identity.txt
+docker compose up -d --no-build
+
+# restore over a DATA_DIR that still holds files (they are deleted, but only
+# after the backup has been downloaded, decrypted and checked)
+docker compose run --rm -T restore --force /run/restore/identity.txt   < the GET URL
+```
+
+`/work/restore/identity.txt` is the default place on the host;
+`RESTORE_IDENTITY_FILE` in `.env` names another. Inside the container it is
+always `/run/restore/identity.txt`, which is why that path follows `--force`.
+`restore` runs `volume-init` first, so `DATA_DIR` gets its layout even when
+it came back empty.
+
+Standard output is exactly one line of JSON; Docker's and compose's own
+messages go to standard error.
+
+```
+backup   {"ok":true,"kind":"hot"|"cold","format":1,"bytes":N,"sha256":"...","seconds":S,"openclaw":"<version>"}
+restore  {"ok":true,"kind":"hot"|"cold","created":"<when the backup was made>","bytes":N,"sha256":"...","files":N,"seconds":S}
+either   {"ok":false,"error":"<what went wrong>"}
+```
+
+`bytes` and `sha256` describe the encrypted object as uploaded or downloaded.
+
+| Exit status | Standard output | Meaning |
+|---|---|---|
+| 0 | `{"ok":true,...}` | Done. |
+| 1 | `{"ok":false,"error":...}` | The script refused or failed, and says why: the bot is running (cold backup, restore), no `BACKUP_AGE_RECIPIENT`, no usable URL on standard input, the data directory holds no bot (`backup`: never an empty backup), the upload or download failed or was refused (`HTTP 403` for an expired URL, `404` for a missing object), the identity file cannot be read or does not decrypt the object, the data directory is not empty (restore without `--force`). Nothing was changed in the data directory, except after `unpacking failed part-way`, which asks for `--force`. |
+| not 0 | empty | Docker could not run the command at all; the reason is on standard error. Examples: the bot is not running (`exec`), the image is not pulled, a mount failed. 137 means the container was killed (out of memory). |
+
+So: a line of JSON with `"ok":true` and exit status 0 is the only success.
+Depending on the Compose version, a missing `DATA_DIR/home` or a missing
+identity file either stops Docker from starting the container (no JSON) or
+is created by Docker as an empty directory, which the script then refuses
+(JSON, exit 1). In the second case an empty directory is left at that path:
+that is why the command above removes `/work/restore` before it writes the
+identity.
+
+A transfer is tried up to three times and each try may take 900 seconds
+(`BACKUP_UPLOAD_TIMEOUT`, `BACKUP_DOWNLOAD_TIMEOUT`, in seconds), so do not
+give up on a command before that.
+
+Scratch space is `/tmp` inside the container that runs the script, which is
+the container's own writable layer on Docker's disk: not `/workspace`, and
+not memory. A hot backup needs about twice the size of the data there, a cold
+one the size of the compressed archive, a restore the encrypted object plus
+the decrypted archive.
+
+Not part of a backup, so new after a restore: the model proxy's usage
+counters, the VNC password, caches, and everything that lives only in `.env`.
+`README.md`, "Back up and restore", has the full list.
 
 ## Measured in rooms (2026-11-23, `sealed-4x8`, published images, test model)
 

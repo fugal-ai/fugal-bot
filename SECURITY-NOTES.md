@@ -400,6 +400,12 @@ Who can read one:
   the data directory, and should sit somewhere that is wiped with the room.
   While it is there, the room's host can read it, and with it every backup
   of that bot. A restore on a host you do not trust exposes the history.
+- The two one-shot services of the hosted overlay (`compose.hosted.yaml`)
+  keep that shape. `backup` gets the home directory read-only and, of all
+  the settings, only the public key. `restore` gets the identity as a
+  read-only file for that one run, and no other secret. Both run as the
+  bot's unprivileged user without any capability, on the host network (the
+  only one with a way out in a room).
 
 What encryption to a public key does not give:
 

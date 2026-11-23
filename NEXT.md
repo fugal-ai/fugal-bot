@@ -45,6 +45,11 @@ Identity, first run and backups, known limits:
   clean one.
 - Nothing rotates or deletes old backups here, and nothing checks a backup by
   restoring it on a schedule.
+- The hosted set of files (`compose.hosted.yaml`: sign-in by token, the
+  `backup` and `restore` one-shots) is tested end to end on an ordinary Docker
+  host with Compose 5.4 (`scripts/hosted-test.sh`), not yet in a room, where
+  Compose is 2.33 and Docker runs under gVisor. The named tunnel service has
+  never been started from this file: it needs a real Cloudflare token.
 - The two desktop fixes for sandbox rooms (`x11vnc -threads`, the websocket
   ping) were measured on an ordinary Docker host only. `x11vnc -threads` ran
   with two viewers at once for 45 s without a crash and passes the smoke
