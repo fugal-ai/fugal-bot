@@ -31,8 +31,18 @@ RUN apt-get update \
 RUN rm -rf /app/skills/clawhub \
  && install -d -m 1777 /tmp/.X11-unix
 
+# Backups (backup.sh / restore.sh): age encrypts the archive to a public key,
+# curl moves it. Debian trixie packages like the ones above, under the same
+# not-yet-pinned apt note. curl is already in the upstream image; naming it
+# here keeps it if upstream drops it. A layer of its own, after the large
+# desktop layer, so that one stays cached.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends age curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && age --version && curl --version | head -1
+
 COPY --chown=root:root supervisord.conf /etc/fugal-bot/supervisord.conf
-COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs healthcheck.sh start-gateway.sh /opt/fugal-bot/
+COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs healthcheck.sh start-gateway.sh backup.sh restore.sh /opt/fugal-bot/
 COPY --chown=root:root seed/ /opt/fugal-bot/seed/
 COPY --chown=root:root openbox-autostart /etc/xdg/openbox/autostart
 RUN chmod 0755 /opt/fugal-bot/*.sh /opt/fugal-bot/seed /etc/xdg/openbox/autostart \
