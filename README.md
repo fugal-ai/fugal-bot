@@ -134,8 +134,12 @@ Set in `.env`, applied by `bot/render-config.mjs` at every start:
   publishing to GitHub, plugin installs, self-written skills).
 
 Always on: OpenClaw is told the endpoint reports token usage on streamed
-replies (so it knows how full the context is), and the browser tool returns
-its compact page snapshot unless the agent asks for more. Measured with the
+replies (so it knows how full the context is), the browser tool returns
+its compact page snapshot unless the agent asks for more (it lists what can be
+clicked, not the page's words; AGENTS.md tells the agent to read a page with
+the browser's `text` action and `maxChars: 4000`), and `web_fetch` returns at
+most 6,000 characters of a page, 12,000 if the agent asks (OpenClaw's own
+default and cap: 20,000). Measured with the
 test model on OpenClaw v2026.11.6: the first request of a new bot shrank from
 69,700 to 47,400 bytes with the tool list trimmed and the shorter starter
 files below (about 5,600 fewer input tokens on every call at four characters
@@ -144,6 +148,18 @@ a token).
 Not set, because it could not be tested without paid calls: prompt-cache keys
 (`compat.supportsPromptCacheKey`) and a separate image model
 (`agents.defaults.imageModel`).
+
+"OpenClaw couldn't finish this reply" after a long turn: seen with
+DeepSeek-V4-Flash on Chutes (2026-11-23). Now and then a streamed answer turns
+into garbage part way (mixed languages, repeated letters); when that happens
+inside a tool call, its arguments are not valid JSON, and OpenClaw
+(v2026.11.6) records "Provider returned an incomplete or malformed tool call".
+It continues the turn once after the first such answer and ends it at the
+second; the number is fixed in OpenClaw, not a setting. The HTTP status stays
+200, so neither model proxy counts it as an error. Short turns are the
+defence: AGENTS.md sends chain questions to `taoq` (also when the user names
+a site such as taostats.io, which shows automated browsers a bot check), and
+tells the agent to stop after a few fruitless steps and say what went wrong.
 
 ## Name, look and first conversation
 

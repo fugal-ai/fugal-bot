@@ -441,6 +441,16 @@ counters, the VNC password, caches, and everything that lives only in `.env`.
   from their own thread (`x11vnc -threads`). Locally that took the handshake
   from 200-390 ms (400-890 ms with the container held to 0.3 CPU) to about
   100 ms in both cases. **Not yet confirmed in a room.**
+- **The agent's browser in a room** (a real bot, real model, from OpenClaw's
+  own records): starting Chromium and opening a heavy JavaScript page 21 s
+  (12 s of it the browser start), later navigations 4 to 15 s, a snapshot or
+  a `text` read about 1 s. Locally, without gVisor: 16 to 17 s for the first
+  open, 4 s for a snapshot, under 1 s for `text`. So the browser works under
+  gVisor and is not slow enough to hit a time limit. Locally, taostats.io's
+  subnet page answered the agent's browser with a bot check ("Couldn't verify
+  your browser") and no figures; in the room the snapshot of that page had
+  the same size (711 characters), the page text was not read there. Its home
+  page loaded locally.
 
 ## What differs from the default layout, and what is untested
 

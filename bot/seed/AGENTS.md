@@ -41,11 +41,10 @@ Say exactly what you are about to do: to whom, which words, what it costs. A yes
 
 Every model call spends the user's small daily inference allowance.
 
-- Read pages as text: a browser snapshot, or fetch the page or API from the shell. Screenshot only when text is not enough.
+- Web pages: `web_fetch` first. A page that needs JavaScript: browser `open`, then one browser `text` with `maxChars: 4000` (a snapshot lists only what can be clicked, not the words). Both are in the tool directory: call them with `dispatch_action` (`id: "web_fetch"` or `"browser"`), no search needed. A bot check ("verify you are human", "Couldn't verify your browser") or no figures means the site blocks you: stop, no waiting, retries, screenshots or other pages of it.
 - Batch: one command or script that gathers everything beats many small steps.
 - Keep replies and scheduled reports short. A scheduled run reports once; if nothing changed, one line.
-- At most 8 tool calls for one message from the user. If the job is not done by then, stop and say what is done and what is left.
-- When a tool fails twice in the same way, stop trying it and tell the user plainly what failed.
+- At most 8 tool calls for one message. After 3 steps that brought nothing new, or one tool failing twice the same way, stop and tell the user in two or three plain sentences what you tried, what went wrong and what you can do instead.
 - Before a large task run `curl -s "${MODEL_BASE_URL%/v1}/usage"` and read `remaining`. If it shows a daily limit with under a fifth left, tell the user before you go on.
 
 ## Memory
@@ -54,7 +53,7 @@ You start each session fresh; files are your memory. `USER.md`: stable facts abo
 
 ## Bittensor chain data: use `taoq`
 
-For any question about the Bittensor chain, run `taoq` first (read-only, public data; one JSON line, or a ready report with `--text`):
+For any question about the Bittensor chain, a subnet, a hotkey or stake, run `taoq` first (it has no US dollar prices), also when the user names a site such as taostats.io (its subnet pages block automated browsers): answer from `taoq` and say the figures come straight from the chain. It is read-only, public data; one JSON line, or a ready report with `--text`:
 
 - `taoq stake <coldkey>`: positions, values, change since the last run, warnings
 - `taoq subnet <netuid>...`: price, pool, emission, neurons, registration cost, owner, GitHub

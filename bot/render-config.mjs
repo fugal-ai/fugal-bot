@@ -228,6 +228,11 @@ const managed = {
   // --- tools: shell + files + browser on this container ---------------------
   tools: {
     exec: { mode: execMode },
+    // One fetched page goes into every later request of the turn. OpenClaw's
+    // defaults (20,000 characters, ~5,000 tokens) let a few pages fill a
+    // small model's context and the user's allowance; 6,000 by default and at
+    // most 12,000 when the agent asks for more (~1,500 / ~3,000 tokens).
+    web: { fetch: { maxChars: 6000, maxCharsCap: 12000 } },
     // Ours plus whatever the owner denied in the web UI; names we put there
     // at an earlier start and no longer want are taken out again.
     deny: [
@@ -244,9 +249,11 @@ const managed = {
     headless: false, // visible on the bot's desktop (DISPLAY=:1, watch via noVNC)
     noSandbox: true, // Chromium's own sandbox needs userns, which we do not grant
     executablePath: "/usr/bin/chromium",
-    // Page snapshots (text with element references) in the compact form unless
-    // the agent asks for another: fewer tokens per page than the full form,
-    // and far fewer than a screenshot.
+    // Snapshots in the compact form unless the agent asks for another
+    // (interactive elements only, depth 6, at most 8,000 characters; the full
+    // form allows 40,000). It lists what can be clicked, NOT the page's text:
+    // reading a page is the browser's `text` action (AGENTS.md says so, with
+    // maxChars; OpenClaw has no setting for its default there).
     snapshotDefaults: { mode: "efficient" },
   },
 
