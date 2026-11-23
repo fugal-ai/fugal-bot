@@ -1,0 +1,50 @@
+# TEST ONLY overlay used by scripts/gateway-chain-test.sh, on top of
+# compose.yaml and scripts/smoke.compose.yaml: a second model proxy in gateway
+# mode (the same image) stands between the bot's own model proxy and the
+# scripted model, as the central gateway does for hosted bots:
+#
+#   agent -> modelproxy (room mode, holds only the bot's token)
+#         -> llmgateway (gateway mode, holds the upstream key, the tenant table and the caps)
+#         -> brain (scripted model; refuses any key but the gateway's)
+services:
+  llmgateway:
+    build:
+      context: ./modelproxy
+    image: ${MODELPROXY_IMAGE:-fugal-bot-modelproxy:stage0}
+    environment:
+      MODELPROXY_MODE: gateway
+      MODEL_BASE_URL: http://brain:11500/v1
+      MODEL_API_KEY: ${SMOKE_CANARY_KEY:?set by scripts/gateway-chain-test.sh}
+      # Reachable on the test network only: nothing is published. The test
+      # itself calls it from inside this container.
+      MODELPROXY_ADMIN_LISTEN_HOST: 0.0.0.0
+    depends_on: [brain]
+    networks: [smokenet, gatewaynet]
+    tmpfs:
+      - /data:uid=1002,gid=1002,mode=700
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "python3", "-I", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9001/healthz',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  # The bot's own model proxy: unchanged code, pointed at the gateway with the
+  # bot's token. It is no longer on the scripted model's network.
+  modelproxy:
+    environment:
+      MODEL_BASE_URL: http://llmgateway:9001/v1
+      MODEL_API_KEY: ${GATEWAY_TEST_TOKEN:?set by scripts/gateway-chain-test.sh}
+    networks: !override [modelnet, gatewaynet]
+    depends_on:
+      llmgateway:
+        condition: service_healthy
+
+networks:
+  gatewaynet:
+    internal: true
