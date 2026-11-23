@@ -59,6 +59,10 @@ trap cleanup EXIT
 case "$KIND" in hot|cold) ;; *) die "usage: backup.sh hot|cold  (with a presigned PUT URL on stdin)" ;; esac
 [ -d "$DATA" ] || die "the data directory $DATA does not exist"
 DATA=$(cd "$DATA" && pwd -P)
+# "The directory exists" proves nothing: Docker creates a missing bind-mount
+# source as an empty directory. An empty archive must never be reported as a
+# backup, so the directory has to hold a bot's state.
+[ -s "$DATA/.openclaw/openclaw.json" ] || die "$DATA does not hold a bot's data (no .openclaw/openclaw.json): nothing to back up"
 
 RECIPIENTS=()
 for r in $(printf '%s' "${BACKUP_AGE_RECIPIENT:-}" | tr ',' ' '); do
