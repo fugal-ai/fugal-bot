@@ -32,10 +32,11 @@ RUN rm -rf /app/skills/clawhub \
  && install -d -m 1777 /tmp/.X11-unix
 
 COPY --chown=root:root supervisord.conf /etc/fugal-bot/supervisord.conf
-COPY --chown=root:root entrypoint.sh render-config.mjs healthcheck.sh start-gateway.sh /opt/fugal-bot/
+COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs healthcheck.sh start-gateway.sh /opt/fugal-bot/
+COPY --chown=root:root seed/ /opt/fugal-bot/seed/
 COPY --chown=root:root openbox-autostart /etc/xdg/openbox/autostart
-RUN chmod 0755 /opt/fugal-bot/*.sh /etc/xdg/openbox/autostart \
- && chmod 0644 /opt/fugal-bot/render-config.mjs /etc/fugal-bot/supervisord.conf
+RUN chmod 0755 /opt/fugal-bot/*.sh /opt/fugal-bot/seed /etc/xdg/openbox/autostart \
+ && chmod 0644 /opt/fugal-bot/*.mjs /opt/fugal-bot/seed/* /etc/fugal-bot/supervisord.conf
 
 # Everything the bot owns lives under /home/node, which is the ONE persistent
 # volume (mounted by compose). Nothing secret is baked into this image.
