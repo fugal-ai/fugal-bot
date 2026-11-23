@@ -61,9 +61,13 @@ RUN n=0; for d in /app/node_modules/.pnpm/@openai+codex@*-linux-*; do \
 
 # The upstream image's environment, written down for the check in the last
 # stage. The second line stops the build if upstream sets a variable that the
-# last stage does not know about.
+# last stage does not know about. Build arguments of this stage show up in a
+# RUN step's environment too when a value is passed (the images workflow
+# passes GIT_REVISION and BUILD_DATE), so they are on the list of names that
+# are not upstream's; anything else is printed before the build stops.
 RUN env | grep -E '^(PATH|NODE_VERSION|YARN_VERSION|COREPACK_HOME|PLAYWRIGHT_BROWSERS_PATH|NODE_ENV)=' | sort > /etc/fugal-bot/upstream-env \
- && test "$(env | grep -c -v -E '^(PATH|NODE_VERSION|YARN_VERSION|COREPACK_HOME|PLAYWRIGHT_BROWSERS_PATH|NODE_ENV|HOME|HOSTNAME|PWD|SHLVL|OLDPWD|_)=')" = 0
+ && extra="$(env | cut -d= -f1 | grep -v -E '^(PATH|NODE_VERSION|YARN_VERSION|COREPACK_HOME|PLAYWRIGHT_BROWSERS_PATH|NODE_ENV|HOME|HOSTNAME|PWD|SHLVL|OLDPWD|_|GIT_REVISION|BUILD_DATE|SOURCE_DATE_EPOCH|DEBIAN_FRONTEND)$' || true)" \
+ && if [ -n "$extra" ]; then echo "unexpected environment variables in the upstream image: $extra" >&2; exit 1; fi
 
 # ---- the image -------------------------------------------------------------------
 # The prepared file system as ONE layer. Deleting a file in a later layer of
