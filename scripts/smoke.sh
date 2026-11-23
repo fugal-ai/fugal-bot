@@ -13,6 +13,11 @@
 #   bot in a frame on another origin of the same site, who may frame it, what
 #   a sibling host can do with the cookie, sign-out. SMOKE_SSO=0 skips this.
 #
+# First conversation (scripted brain, new data directory): greeting, a `taoq`
+#   chain read in the bot's shell (SMOKE_TAOQ=live, or fixture for no network),
+#   a schedule made with OpenClaw's automations tool and run once, BOOTSTRAP.md
+#   retired (scripts/first-conversation.sh).
+#
 # Also (bot/seed/, bot/backup.sh, bot/restore.sh): with the scripted brain the
 #   bot gets a name, an emoji, an accent colour, first-run files, a model
 #   extra-body field and BACKGROUND_MODEL_USE=off, and the test checks each of
@@ -79,8 +84,14 @@ SEED_TEST=0
 if [ "$BRAIN" = scripted ]; then
   SEED_TEST=1
   export BOT_DISPLAY_NAME="Smoke Otter" BOT_EMOJI="🦦" UI_ACCENT_COLOR="#2f6fed" SEED_WORKSPACE=1
-  # The well-known "Alice" development address: public, and nobody's wallet.
-  export OWNER_WALLET_SS58=5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
+  # SN70's owner coldkey (public, on chain as SubnetOwner(70)), so the first
+  # conversation reads a real stake position; the recorded read in
+  # bot/tools/fixtures/finney.json.gz is for this address.
+  export OWNER_WALLET_SS58=5GbydRVj98hQZvR2cf4t8WtcoUVjAuJykxxuqauiJpJqwB7m
+  # The chain tool in the first conversation: live (finney) or fixture (no network).
+  SMOKE_TAOQ=${SMOKE_TAOQ:-live}
+  export BRAIN_TAOQ_ENV=
+  [ "$SMOKE_TAOQ" = fixture ] && export BRAIN_TAOQ_ENV="TAOQ_FIXTURE=/tmp/taoq-fixture.json.gz TAOQ_ENDPOINTS=ws://127.0.0.1:9"
   export MODEL_INPUT=text MODEL_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false}}'
   export BACKGROUND_MODEL_USE=off TOOLS_DENY=
 fi
@@ -289,8 +300,9 @@ if [ "$SEED_TEST" = 1 ]; then
         bash -c '[[ "$0" == *"Hi, I'"'"'m $1 $2, your own always-on agent, with my own computer and browser."* && "$0" == *"I'"'"'ll never ask for a seed phrase or private key. I only read public chain data."* && "$0" == *"Want a **daily stake report** for the wallet you signed in with? Tell me your time zone"* && "$0" != *"{{"* ]]' \
         "$boot" "$BOT_DISPLAY_NAME" "$BOT_EMOJI"
       userfile=$("${DC[@]}" exec -T bot cat /home/node/workspace/USER.md 2>&1)
+      greet=$(printf '%s' "$boot" | sed -n "/^Hi, I'm/,/^Or just tell me what you need\./p")
       check "the first message does not print the owner's address; the bot has it in USER.md" \
-        bash -c '[[ "$0" != *"$2"* && "$1" == *"$2"* ]]' "$boot" "$userfile" "$OWNER_WALLET_SS58"
+        bash -c '[ -n "$0" ] && [[ "$0" != *"$2"* && "$1" == *"$2"* ]]' "$greet" "$userfile" "$OWNER_WALLET_SS58"
       check "after the conversations above OpenClaw has left all five exactly as seeded (BOOTSTRAP.md still waiting)" \
         test -n "$SEED_SUMS0" -a "$(seedfiles)" = "$SEED_SUMS0"
       ;;
@@ -571,6 +583,18 @@ pf "$bkout"
 check "the restore checks ran to the end" bash -c '[[ "$0" == *"--force replaced what was there"* ]]' "$bkout"
 docker volume rm -f "$BK_VOL" >/dev/null 2>&1
 [ -d "$BK" ] && rm -rf -- "$BK"
+# --------------------------------------------------------------------------------
+
+# ---- the first conversation (scripts/first-conversation.sh) -----------------------
+# After every check of the starter files: it retires BOOTSTRAP.md.
+if [ "$SEED_TEST" = 1 ] && "${DC[@]}" exec -T bot test -e /home/node/workspace/BOOTSTRAP.md; then
+  # shellcheck source=scripts/first-conversation.sh
+  . scripts/first-conversation.sh
+  bot_sh() { "${DC[@]}" exec -T bot sh -c "$1"; }
+  brain_log() { "${DC[@]}" logs brain 2>&1; }
+  jnum() { num "$@"; }
+  FC_NAME=$BOT_DISPLAY_NAME FC_EMOJI=$BOT_EMOJI FC_WALLET=$OWNER_WALLET_SS58 FC_TAOQ_MODE=$SMOKE_TAOQ first_conversation
+fi
 # --------------------------------------------------------------------------------
 
 # Last on purpose: a refusal changes how the agent treats its model provider.

@@ -159,22 +159,31 @@ All optional; leave them unset and the bot behaves as before.
   - `AGENTS.md`: house rules. Ask before sending a message to anyone else,
     posting, buying, deleting or anything that cannot be undone; never ask
     for or store wallet secrets; spend few model calls (page text before
-    screenshots, batch work); say when the daily allowance is nearly used.
+    screenshots, batch work, at most 8 tool calls per message, stop after a
+    tool fails twice); say when the daily allowance is nearly used; for any
+    Bittensor chain question run `taoq`, never install packages or write
+    RPC code.
   - `BOOTSTRAP.md`, in a brand-new data directory only: the first
     conversation. The bot says who it is, that it will never ask for a seed
     phrase or private key and only reads public chain data, and offers a
     daily stake report for the owner's wallet, then a subnet watch, a hotkey
     watch or research.
-    It sets the chosen job up as a schedule, writes what it learned to its
+    For each job it runs `taoq` once and shows the result, sets the job up
+    as a schedule with OpenClaw's own scheduler (an isolated run that costs 2
+    model calls: one `taoq` run, one reply), writes what it learned to its
     memory files and deletes `BOOTSTRAP.md`, which ends the first run: the
     file is not written again at later starts or after a restore.
+- `taoq` (in the image, on `PATH`): read-only Bittensor reports for those
+  jobs (stake, subnet, hotkey, the week, a subnet brief), JSON or `--text`.
+  No wallet, no keys; public finney endpoints. Units, checks and the
+  real-model test to run: `docs/TAOQ.md`.
 - `OWNER_WALLET_SS58`: the owner's public Bittensor address, written into
   those files so the bot can report on it without asking. Public data.
 
 The templates are in `bot/seed/`. They are short on purpose: OpenClaw sends
 every one of these files to the model with every request, so each line costs
-input tokens for the life of the bot. The five together are 5.6 kB, against
-18.8 kB for the files OpenClaw writes by itself, and 3.0 kB against 11.3 kB
+input tokens for the life of the bot. The five together are 7.5 kB, against
+18.8 kB for the files OpenClaw writes by itself, and 4.1 kB against 11.3 kB
 once `BOOTSTRAP.md` is gone. These rules are instructions to a model,
 not controls: OpenClaw only enforces approval for shell commands
 (`EXEC_MODE=ask`), not for messages, posts or purchases made in the browser.
@@ -418,7 +427,14 @@ call, no real key and no local model. `SMOKE_BRAIN=configured` uses the model
 from `.env` instead (a hosted model costs money; the computer-use checks are
 skipped if that model cannot call tools). Secrets for a hosted model can be
 supplied with `SMOKE_SECRETS_FILE=<env file>`. Unit tests (stdlib only):
-`python3 -I modelproxy/test_modelproxy.py` and `python3 -I gate/test_gate.py`.
+`python3 -I modelproxy/test_modelproxy.py`, `python3 -I gate/test_gate.py`
+and `python3 -I bot/tools/test_taoq.py`; `bot/tools/livecheck.py` checks
+`taoq` against finney (network, `docs/TAOQ.md`). With the scripted model and
+a new data directory both tests end with the first conversation
+(`scripts/first-conversation.sh`): the greeting, a real `taoq` read in the
+bot's shell (`SMOKE_TAOQ` / `HOSTED_TEST_TAOQ=fixture` for a recorded read
+without network), the schedule in OpenClaw's job table and one forced run of
+it, `BOOTSTRAP.md` deleted.
 `scripts/gateway-chain-test.sh` runs the hosted arrangement the same way:
 agent, the bot's model proxy, a second model proxy in gateway mode, the
 scripted model (`docs/MODELPROXY.md`).
@@ -445,7 +461,8 @@ compose.cathedral.yaml optional: every service on the host network (hosts withou
 compose.hosted.yaml    optional, on top of the above: named tunnel (profile "hosted"),
                        backup and restore one-shots
 bot/                   OpenClaw image + desktop, browser, config renderer,
-                       starter files (seed/), backup.sh and restore.sh
+                       starter files (seed/), backup.sh and restore.sh, the chain
+                       tool (tools/taoq.py)
 modelproxy/            holds the model key, meters tokens, enforces the budget; also the
                        central gateway for many bots (one program, Python stdlib)
 gate/                  password login with rate limiting, or sign-in by one-time token
@@ -453,7 +470,8 @@ gate/                  password login with rate limiting, or sign-in by one-time
 proxy/                 Caddy: the one port, TLS, routes to chat and desktop
 scripts/               smoke test, gateway chain test, hosted test and their test-only
                        scripted model
-docs/                  CATHEDRAL.md (sandbox rooms), MODELPROXY.md (the model proxy's two roles)
+docs/                  CATHEDRAL.md (sandbox rooms), MODELPROXY.md (the model proxy's two roles),
+                       TAOQ.md (the chain tool and the first conversation)
 .github/workflows/     images.yml: CI publishes the four images to ghcr.io and packs the
                        room bundle (tags v*, manual)
 UPSTREAM.md            pinned upstream, licences, what was changed

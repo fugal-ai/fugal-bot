@@ -22,7 +22,10 @@
 # /desktop/, who may frame the bot; then a hot backup, a cold backup through
 # the compose "backup" service, the stack removed and DATA_DIR deleted, a
 # restore through the compose "restore" service, a new start, and that a file
-# and a conversation from before the backup are back.
+# and a conversation from before the backup are back. Last, the first
+# conversation (scripts/first-conversation.sh): the greeting, a real `taoq`
+# chain read in the bot's shell, a schedule made with OpenClaw's automations
+# tool and run once, BOOTSTRAP.md retired.
 #
 # NOT run here: the "tunnel" service (a Cloudflare named tunnel needs a real
 # token). Its definition is only checked with `docker compose config`.
@@ -32,6 +35,8 @@
 #     names to build and run (defaults as in the compose files; the proxy is
 #     built from proxy/Dockerfile.nocap, as published)
 #   HOSTED_TEST_PROJECT (fugal-bot-hostedtest), HOSTED_TEST_PORT (18097)
+#   HOSTED_TEST_TAOQ=live (default: the first conversation reads finney, needs
+#     the network) | fixture (a recorded read; no network for the chain tool)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
@@ -53,7 +58,11 @@ STORE=http://127.0.0.1:18999                 # the object store, on the stack's 
 SIGNATURE=hosted-test-signature              # stands for the secret part of a presigned URL
 NAME="Smoke Otter"; EMOJI="🦦"; ACCENT="#2f6fed"
 EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false}}'
-WALLET=5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY   # the public "Alice" development address
+# The owner's address: SN70's owner coldkey (public, on chain as SubnetOwner(70)),
+# so the first conversation reads a real stake position. The recorded read in
+# bot/tools/fixtures/finney.json.gz is for this address.
+WALLET=5GbydRVj98hQZvR2cf4t8WtcoUVjAuJykxxuqauiJpJqwB7m
+TAOQ_MODE=${HOSTED_TEST_TAOQ:-live}
 EDGE="${PROJECT}-sso-edge"
 
 HT=$(mktemp -d "${TMPDIR:-/tmp}/fugal-bot-hosted-test.XXXXXX") || exit 1
@@ -244,6 +253,7 @@ RESTORE_IDENTITY_FILE=$HT/restore/identity.txt
 # ---- this test only ----
 SMOKE_CANARY_KEY=$CANARY_KEY
 BRAIN_IMAGE=$BRAIN_IMG
+BRAIN_TAOQ_ENV=$([ "$TAOQ_MODE" = fixture ] && echo "TAOQ_FIXTURE=/tmp/taoq-fixture.json.gz TAOQ_ENDPOINTS=ws://127.0.0.1:9")
 HOSTED_TEST_UID=$(id -u):$(id -g)
 HOSTED_TEST_STORE_SCRIPT=$REPO/scripts/object-store.py
 HOSTED_TEST_STORE_DIR=$HT/store
@@ -520,6 +530,14 @@ echo "reply: ${reply:0:200}"
 check "the bot recalls the code word from before the backup" bash -c '[[ "$0" == *OSPREY-77* ]]' "$reply"
 u2=$(usage)
 echo "model proxy counters after the restore: requests $(jget "$u2" total.requests) (they are not part of a backup and start again)"
+
+# ---- the first conversation ----------------------------------------------------
+# shellcheck source=scripts/first-conversation.sh
+. "$REPO/scripts/first-conversation.sh"
+bot_sh() { dc exec -T bot sh -c "$1"; }
+brain_log() { dc logs brain 2>&1; }
+jnum() { jget "$@"; }
+FC_NAME=$NAME FC_EMOJI=$EMOJI FC_WALLET=$WALLET FC_TAOQ_MODE=$TAOQ_MODE first_conversation
 
 echo
 echo "== numbers"

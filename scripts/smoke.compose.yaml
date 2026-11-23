@@ -11,6 +11,9 @@ services:
       # Set by smoke.sh to the stand-in API key; the brain then refuses any other.
       BRAIN_EXPECT_KEY: ${SMOKE_CANARY_KEY:-}
       BRAIN_DUMP: ${BRAIN_DUMP:-}   # 1 = log whole request bodies (debugging)
+      # Put in front of every taoq command the brain runs; the first-conversation
+      # test sets TAOQ_FIXTURE=... here for a run without network (scripts/first-conversation.sh).
+      BRAIN_TAOQ_ENV: ${BRAIN_TAOQ_ENV:-}
     networks: [smokenet]
     read_only: true
     cap_drop: [ALL]
