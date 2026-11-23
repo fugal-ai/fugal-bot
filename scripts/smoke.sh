@@ -285,9 +285,12 @@ if [ "$SEED_TEST" = 1 ]; then
       check "new data directory: all five starter files were seeded" \
         bash -c '[[ "$0" == "IDENTITY.md=written, SOUL.md=written, USER.md=written, AGENTS.md=written, BOOTSTRAP.md=written" ]]' "$SEED_LOG"
       boot=$("${DC[@]}" exec -T bot cat /home/node/workspace/BOOTSTRAP.md 2>&1)
-      check "BOOTSTRAP.md opens with the bot's name, says it never asks for a seed phrase or private key, and names the owner's public address" \
-        bash -c '[[ "$0" == *"Hi, I'"'"'m $1 "* && "$0" == *"never ask for your seed phrase or a private key"* && "$0" == *"$2"* && "$0" != *"{{"* ]]' \
-        "$boot" "$BOT_DISPLAY_NAME" "$OWNER_WALLET_SS58"
+      check "BOOTSTRAP.md: the first message opens with the bot's name and emoji, says it never asks for a seed phrase or private key, and offers the stake report for the wallet the owner signed in with" \
+        bash -c '[[ "$0" == *"Hi, I'"'"'m $1 $2, your own always-on agent, with my own computer and browser."* && "$0" == *"I'"'"'ll never ask for a seed phrase or private key. I only read public chain data."* && "$0" == *"Want a **daily stake report** for the wallet you signed in with? Tell me your time zone"* && "$0" != *"{{"* ]]' \
+        "$boot" "$BOT_DISPLAY_NAME" "$BOT_EMOJI"
+      userfile=$("${DC[@]}" exec -T bot cat /home/node/workspace/USER.md 2>&1)
+      check "the first message does not print the owner's address; the bot has it in USER.md" \
+        bash -c '[[ "$0" != *"$2"* && "$1" == *"$2"* ]]' "$boot" "$userfile" "$OWNER_WALLET_SS58"
       check "after the conversations above OpenClaw has left all five exactly as seeded (BOOTSTRAP.md still waiting)" \
         test -n "$SEED_SUMS0" -a "$(seedfiles)" = "$SEED_SUMS0"
       ;;

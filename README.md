@@ -163,7 +163,8 @@ All optional; leave them unset and the bot behaves as before.
   - `BOOTSTRAP.md`, in a brand-new data directory only: the first
     conversation. The bot says who it is, that it will never ask for a seed
     phrase or private key and only reads public chain data, and offers a
-    daily stake report, a subnet watch, a hotkey watch or a research brief.
+    daily stake report for the owner's wallet, then a subnet watch, a hotkey
+    watch or research.
     It sets the chosen job up as a schedule, writes what it learned to its
     memory files and deletes `BOOTSTRAP.md`, which ends the first run: the
     file is not written again at later starts or after a restore.
@@ -172,7 +173,7 @@ All optional; leave them unset and the bot behaves as before.
 
 The templates are in `bot/seed/`. They are short on purpose: OpenClaw sends
 every one of these files to the model with every request, so each line costs
-input tokens for the life of the bot. The five together are 5.9 kB, against
+input tokens for the life of the bot. The five together are 5.6 kB, against
 18.8 kB for the files OpenClaw writes by itself, and 3.0 kB against 11.3 kB
 once `BOOTSTRAP.md` is gone. These rules are instructions to a model,
 not controls: OpenClaw only enforces approval for shell commands
