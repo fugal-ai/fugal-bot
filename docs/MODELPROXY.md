@@ -127,13 +127,14 @@ carries the token as `Authorization: Bearer fbk_...`.
       {"id": "bq4x7k2m9pa", "token_sha256": "<64 hex digits>", "usd_per_day": 0.35,
        "models": ["model-a", "model-b"], "enabled": true}
     ],
-    "prices": {"model-a": [0.6, 2.5], "model-b": [1, 3]},
+    "prices": {"model-a": [0.6, 2.5, 0.06], "model-b": [1, 3]},
     "platform_usd_per_day": 9
   }
   ```
 
-  `prices` is USD per million input and output tokens; every model on a
-  tenant's list needs a row (or a `"*"` row for all others). `usd_per_day` 0
+  `prices` is USD per million tokens, a row being `[input, output]` or
+  `[input, output, cached_input]` (see "Cached prompt tokens" below); every
+  model on a tenant's list needs a row (or a `"*"` row for all others). `usd_per_day` 0
   means nothing, not "no limit". `platform_usd_per_day` is required: a
   number (0 stops all inference) or `null` for no cap across bots.
   `enabled` defaults to true.
@@ -143,7 +144,8 @@ carries the token as `Authorization: Bearer fbk_...`.
   `days`), `tenants` by id (`in_table`, `enabled`, `usd_per_day`, `models`,
   `day`, `remaining_usd`, `exceeded`, `in_flight`, `days`) and
   `rejected_since_start`. A counter row is `requests`, `prompt_tokens`,
-  `completion_tokens`, `total_tokens`, `usd`, `estimated_requests`.
+  `cached_prompt_tokens`, `completion_tokens`, `total_tokens`, `usd`,
+  `estimated_requests`.
 
 **What a tenant gets:**
 
@@ -162,6 +164,33 @@ known after it, so the last calls can overshoot: by at most the cost of
 `MODELPROXY_TENANT_CONCURRENCY` calls per bot. Cost is taken from the
 upstream's `usage` field and the price table; if the upstream sends no
 usage, a rough estimate is counted and marked.
+
+**Cached prompt tokens.** Providers that cache the repeated start of a prompt
+bill those tokens at a fraction of the input price (about a tenth), and report
+how many were served from the cache. The proxy reads that count from the
+upstream's `usage`, in the first of these places it finds a non-negative whole
+number: `prompt_tokens_details.cached_tokens` (OpenAI style; Chutes, vLLM),
+`input_tokens_details.cached_tokens` (Responses API), `prompt_cache_hit_tokens`
+(DeepSeek), `cache_read_input_tokens` (Anthropic style), `cached_tokens`.
+Cached tokens count as part of `prompt_tokens`. They are kept as their own
+counter, `cached_prompt_tokens`, in every counter row (per tenant, platform,
+day and total in the gateway; per day and total in a room's `GET /usage`), for
+JSON and streamed replies alike. The cost of a call is
+
+    (prompt - cached) * input + cached * cached_input + completion * output
+
+per million tokens. A price row with two values bills cached tokens at the
+full input price, which is what happened before the third value existed and
+the safe default when a provider's cache price is not known. A count above the
+prompt is treated as the whole prompt; the cost is never negative; a reply
+that reports no cache information counts zero cached tokens. A room proxy
+takes the same rows in `BUDGET_PRICES`, for example
+`{"model-a": [0.6, 2.5, 0.06], "*": [1, 3]}`. An older gateway (before this
+change) refuses three-value rows, so send two-value rows to it.
+
+Stored files stay compatible in both directions as far as rows go: a counter
+file written before the counter existed loads with zero cached tokens, and a
+stored table keeps each row with the number of values it was given.
 
 **Kept apart.** Of a tenant's request headers only `Content-Type`, `Accept`
 and `User-Agent` go upstream (not its address as added by a reverse proxy,

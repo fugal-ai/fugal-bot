@@ -99,7 +99,7 @@ docker compose exec modelproxy python3 -I -c "import urllib.request;print(urllib
 
 Optional hard caps in `.env`: `BUDGET_TOKENS_PER_DAY`, `BUDGET_TOKENS_TOTAL`,
 `BUDGET_USD_PER_DAY` and `BUDGET_USD_TOTAL` (these two need `BUDGET_PRICES`,
-a price table per model), and `BUDGET_REQUESTS_PER_MINUTE`. Once a cap is
+a price table per model, optionally with a cached-input price as a third number), and `BUDGET_REQUESTS_PER_MINUTE`. Once a cap is
 reached the model proxy refuses further model calls, and instead of an answer
 the web chat shows "Your request couldn't be completed: LLM request rejected:
 This bot has used up its inference allowance for today and it renews at

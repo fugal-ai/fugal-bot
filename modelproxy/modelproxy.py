@@ -17,7 +17,8 @@ gateway
     as a whole through an admin API on a second listener
     (MODELPROXY_ADMIN_LISTEN_HOST / _PORT) that must never be published:
         PUT /admin/tenants   {"tenants":[{"id","token_sha256","usd_per_day","models":[..],"enabled"}],
-                              "prices":{model:[in,out] USD per million tokens},"platform_usd_per_day":N}
+                              "prices":{model:[in,out] or [in,out,cached_in] USD per million tokens},
+                              "platform_usd_per_day":N}
         GET /admin/tenants   the table as stored
         GET /admin/usage     per-tenant and platform usage, today and recent days
     A room-mode proxy can point at a gateway (MODEL_BASE_URL = the gateway,
@@ -31,7 +32,8 @@ Endpoints on the main listener (both roles):
 Anything else is refused: the key can only be used for inference calls.
 
 Metering: prompt and completion tokens are taken from the upstream `usage`
-field of every successful response and added to per-day (UTC) counters kept
+field of every successful response, and so are the cached prompt tokens when the
+upstream says how many (see usage_tokens), and added to per-day (UTC) counters kept
 in MODELPROXY_DATA_DIR (room: usage.json, with a running total; gateway:
 tenants.json and one gateway-usage-<day>.json per day). Files are replaced
 atomically. On streams the proxy asks the upstream for usage
@@ -221,11 +223,11 @@ class Config:
 
     @staticmethod
     def _prices(raw):
-        """{"model-id": [usd per 1M input tokens, usd per 1M output tokens], "*": [...]}"""
+        """{"model-id": [usd per 1M input, per 1M output(, per 1M cached input)], "*": [...]}"""
         if not raw:
             return {}
-        bad = ConfigError('BUDGET_PRICES must be JSON like {"model-id": [0.5, 1.5], "*": [1, 3]} '
-                          "(USD per million input and output tokens)")
+        bad = ConfigError('BUDGET_PRICES must be JSON like {"model-id": [0.5, 1.5], "*": [1, 3, 0.1]} '
+                          "(USD per million input and output tokens, optionally a third number for cached input tokens)")
         try:
             table = json.loads(raw)
         except ValueError:
@@ -258,28 +260,41 @@ def _is_number(x):
 
 
 def price_table(table):
-    """A checked copy of {"model-id": [in, out]} (USD per million tokens), or None if malformed."""
+    """A checked copy of {"model-id": [in, out]} or {"model-id": [in, out, cached_in]}
+    (USD per million tokens), or None if malformed. A row keeps the number of
+    values it was given, so a stored table is written back as it was read."""
     if not isinstance(table, dict):
         return None
     out = {}
     for model, pair in table.items():
-        if not (isinstance(model, str) and model and isinstance(pair, list) and len(pair) == 2
+        if not (isinstance(model, str) and model and isinstance(pair, list) and len(pair) in (2, 3)
                 and all(_is_number(x) for x in pair)):
             return None
-        out[model] = (float(pair[0]), float(pair[1]))
+        out[model] = tuple(float(x) for x in pair)
     return out
 
 
 def price_of(prices, model):
-    """Price pair for a model: its own row, else "*", else the dearest row
-    (an unlisted model must never be free under a USD cap)."""
+    """(input, output, cached input) USD per million tokens for a model: its own
+    row, else "*", else the dearest row (an unlisted model must never be free
+    under a USD cap). A row without a cached price bills cached tokens as input."""
     if not prices:
-        return (0.0, 0.0)
+        return (0.0, 0.0, 0.0)
     if model in prices:
-        return prices[model]
-    if "*" in prices:
-        return prices["*"]
-    return max(prices.values(), key=lambda p: p[0] + p[1])
+        row = prices[model]
+    elif "*" in prices:
+        row = prices["*"]
+    else:
+        row = max(prices.values(), key=lambda p: p[0] + p[1])
+    return (row[0], row[1], row[2] if len(row) > 2 else row[0])
+
+
+def cost_usd(price, prompt, completion, cached=0):
+    """USD for one call. `price` is (input, output, cached input) per million
+    tokens; cached tokens are part of `prompt`, and never more than it."""
+    cached = min(max(cached, 0), max(prompt, 0))
+    pin, pout, pcached = price
+    return max(0.0, ((max(prompt, 0) - cached) * pin + cached * pcached + max(completion, 0) * pout) / 1e6)
 
 
 def write_json(path, obj):
@@ -298,7 +313,7 @@ def utc_day(ts):
 
 def _zero():
     return {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-            "usd": 0.0, "estimated_requests": 0}
+            "cached_prompt_tokens": 0, "usd": 0.0, "estimated_requests": 0}
 
 
 class Meter:
@@ -379,13 +394,14 @@ class Meter:
                 self.recent.append(now)
         return None
 
-    def record(self, model, prompt, completion, estimated=False):
-        pin, pout = self.cfg.price(model)
-        usd = (prompt * pin + completion * pout) / 1e6
+    def record(self, model, prompt, completion, estimated=False, cached=0):
+        cached = min(cached, prompt)
+        usd = cost_usd(self.cfg.price(model), prompt, completion, cached)
         with self.lock:
             for row in (self.total, self.days.setdefault(self.today(), _zero())):
                 row["requests"] += 1
                 row["prompt_tokens"] += prompt
+                row["cached_prompt_tokens"] += cached
                 row["completion_tokens"] += completion
                 row["total_tokens"] += prompt + completion
                 row["usd"] = round(row["usd"] + usd, 8)
@@ -436,8 +452,9 @@ def parse_state(obj):
             raise StateError(f"'{field}' is required (this call replaces the whole table)")
     prices = price_table(obj["prices"])
     if prices is None:
-        raise StateError("'prices' must be an object like {\"model-id\": [0.5, 1.5]} "
-                         "(USD per million input and output tokens)")
+        raise StateError("'prices' must be an object like {\"model-id\": [0.5, 1.5]} or "
+                         "{\"model-id\": [0.5, 1.5, 0.05]} (USD per million input, output and, "
+                         "optionally, cached input tokens)")
     cap = obj["platform_usd_per_day"]
     if cap is not None and not _is_number(cap):
         raise StateError("'platform_usd_per_day' must be a number of zero or more, or null for no cap")
@@ -624,15 +641,16 @@ class Gateway:
             if self.in_flight[tid] <= 0:
                 del self.in_flight[tid]
 
-    def record(self, tid, model, prompt, completion, estimated=False):
+    def record(self, tid, model, prompt, completion, estimated=False, cached=0):
+        cached = min(cached, prompt)
         with self.lock:
-            pin, pout = price_of(self.state["prices"], model)
-            usd = (prompt * pin + completion * pout) / 1e6
+            usd = cost_usd(price_of(self.state["prices"], model), prompt, completion, cached)
             today = self.today()
             day = self.days.setdefault(today, {"platform": _zero(), "tenants": {}})
             for row in (day["platform"], day["tenants"].setdefault(tid, _zero())):
                 row["requests"] += 1
                 row["prompt_tokens"] += prompt
+                row["cached_prompt_tokens"] += cached
                 row["completion_tokens"] += completion
                 row["total_tokens"] += prompt + completion
                 row["usd"] = round(row["usd"] + usd, 8)
@@ -678,10 +696,15 @@ class Gateway:
 
 
 def usage_tokens(obj):
-    """(prompt, completion) from an OpenAI-style object, or None. Understands
-    Chat Completions / Embeddings (`usage.prompt_tokens`, `completion_tokens`)
-    and the Responses API (`usage.input_tokens`, `output_tokens`, also nested
-    under `response` in its final stream event)."""
+    """(prompt, completion, cached prompt) from an OpenAI-style object, or None.
+    Understands Chat Completions / Embeddings (`usage.prompt_tokens`,
+    `completion_tokens`) and the Responses API (`usage.input_tokens`,
+    `output_tokens`, also nested under `response` in its final stream event).
+    Cached prompt tokens (part of the prompt, never more than it) are read from
+    the first of these that is present: `prompt_tokens_details.cached_tokens`
+    (OpenAI, Chutes, vLLM), `input_tokens_details.cached_tokens` (Responses
+    API), `prompt_cache_hit_tokens` (DeepSeek), `cache_read_input_tokens`
+    (Anthropic style), top-level `cached_tokens`; else 0."""
     if not isinstance(obj, dict):
         return None
     u = obj.get("usage")
@@ -697,16 +720,24 @@ def usage_tokens(obj):
                 return v
         return None
 
+    def cached_count():
+        for key in ("prompt_tokens_details", "input_tokens_details"):
+            details = u.get(key)
+            v = details.get("cached_tokens") if isinstance(details, dict) else None
+            if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+                return v
+        return n("prompt_cache_hit_tokens", "cache_read_input_tokens", "cached_tokens") or 0
+
     prompt, completion, total = n("prompt_tokens", "input_tokens"), n("completion_tokens", "output_tokens"), n("total_tokens")
     if prompt is None and completion is None:
         if total is None:
             return None
-        return total, 0
+        return total, 0, 0
     if prompt is None:
         prompt = max(0, total - completion) if total is not None else 0
     if completion is None:
         completion = max(0, total - prompt) if total is not None else 0
-    return prompt, completion
+    return prompt, completion, min(cached_count(), prompt)
 
 
 def retry_after(resp):
@@ -1118,10 +1149,10 @@ class Handler(BaseHTTPRequestHandler):
         if usage is None:
             # The upstream sent no usage: a rough count, so the cap still bites.
             estimated = True
-            usage = (len(body or b"") // 4, scan.chunks if scan is not None else len(kept) // 4)
-        record(model, usage[0], usage[1], estimated)
+            usage = (len(body or b"") // 4, scan.chunks if scan is not None else len(kept) // 4, 0)
+        record(model, usage[0], usage[1], estimated, usage[2])
         log(f"{method} {rest}{who} -> {status}{' stream' if is_sse else ''} prompt={usage[0]} completion={usage[1]}"
-            f"{' (estimated)' if estimated else ''}{retried}{note} {took:.1f}s")
+            f"{f' cached={usage[2]}' if usage[2] else ''}{' (estimated)' if estimated else ''}{retried}{note} {took:.1f}s")
 
 
 class AdminHandler(BaseHTTPRequestHandler):
