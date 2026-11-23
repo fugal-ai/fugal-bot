@@ -271,12 +271,12 @@ if [ "$BUILD" = 1 ]; then
 else
   # --no-build: the four images as published (e.g. BOT_IMAGE=ghcr.io/...@sha256:...
   # from a CI run), pulled when missing. Only the test-only scripted model is
-  # built here, if it is not there yet (a small Python image).
+  # built here (a small Python image, from this checkout, so it matches the
+  # checks below).
   for img in "$BOT_IMG" "$MODELPROXY_IMG" "$GATE_IMG" "$PROXY_IMG"; do
     docker image inspect "$img" >/dev/null 2>&1 || docker pull -q "$img" >/dev/null || { echo "cannot pull $img"; exit 1; }
   done
-  docker image inspect "$BRAIN_IMG" >/dev/null 2>&1 ||
-    docker build -q -t "$BRAIN_IMG" scripts/scripted-brain >/dev/null || { echo "cannot build the scripted model"; exit 1; }
+  docker build -q -t "$BRAIN_IMG" scripts/scripted-brain >/dev/null || { echo "cannot build the scripted model"; exit 1; }
 fi
 # The age key pair. The identity goes where the restore reads it, readable by
 # uid 1000 only; the bot only ever gets the public key.

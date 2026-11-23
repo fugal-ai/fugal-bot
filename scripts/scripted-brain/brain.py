@@ -128,7 +128,12 @@ PRIMER_SED = re.compile(r"sed -n '/\^## Staking/,/\^## /p' \{baseDir\}/PRIMER\.m
 HOW = re.compile(r"(?i)^how does (\w+) work")
 # Phrases found only in the reference files (PRIMER.md, GLOSSARY.md), never in
 # the always-sent prompt: if one is in a request, the agent read that file.
-REFERENCE_MARKS = ("Balancer-style", "Activity cutoff")
+REFERENCE_MARKS = ("Balancer-style", "Activity cutoff", "and what a staker earns")
+
+
+def skill_entry(system, name):
+    m = re.search(r"<skill>\s*<name>%s</name>.*?</skill>" % re.escape(name), system, re.S)
+    return m.group(0) if m else ""
 
 
 def skills_list(system):
@@ -307,6 +312,7 @@ class H(BaseHTTPRequestHandler):
                           if m.get("role") in ("system", "developer"))
         everything = raw.decode("utf-8", "replace")
         log(f"request bytes={len(raw)} system_chars={len(system)} skills_list_bytes={len(skills_list(system).encode())} "
+            f"bittensor_entry_bytes={len(json.dumps(skill_entry(system, 'bittensor'))) - 2} "
             f"reference_text={'yes' if any(m in everything for m in REFERENCE_MARKS) else 'no'}")
         if DUMP:
             log("dump", raw.decode("utf-8", "replace"))

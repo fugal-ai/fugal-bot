@@ -8,7 +8,7 @@ Use for "how does ... work", "what is ...", "why did ... change" and "where can 
 
 Read only what the question needs, never a whole file:
 
-- Mechanisms: `grep -n '^## ' {baseDir}/PRIMER.md` lists the sections; read one with `sed -n '/^## Staking/,/^## /p' {baseDir}/PRIMER.md` (put the section's first words after `^## `). "Reading taoq's fields" says what each taoq figure means.
+- Mechanisms: `grep -n '^## ' {baseDir}/PRIMER.md` lists the sections; read one with `sed -n '/^## Staking/,/^## /p' {baseDir}/PRIMER.md` (after `^## ` put only the heading's first word: no quotes or apostrophes in the pattern). "Reading taoq's fields" says what each taoq figure means.
 - A term: `grep -i -m3 '^- \*\*<term>' {baseDir}/GLOSSARY.md`.
 - Where to look (docs, repos, which source to trust): `sed -n '/^## Part 1/,/^## Part 2/p' {baseDir}/SOURCES.md`.
 

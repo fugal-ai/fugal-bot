@@ -414,6 +414,20 @@ counters, the VNC password, caches, and everything that lives only in `.env`.
 
 ## Measured in rooms (2026-11-23, `sealed-4x8`, published images, test model)
 
+- **Faster start (2026-11-23, later; images of e20571d, controller with a
+  second Docker daemon on `/work`, real model).** `openclaw doctor --fix` now
+  runs only at the first start of an image on a data directory
+  (`bot/start-gateway.sh`): a new bot's gateway was listening 38 s after the
+  container started, up -> healthy 73 s. A new bot: create -> running
+  **4 min 47 s** (pull of all images 144 s on the second daemon, `up` 39 s,
+  healthy 73 s), then a real first conversation (greeting 1 call; daily stake
+  report 6 calls; job isolated, light context; BOOTSTRAP.md retired). A user
+  restart: **5 min 35 s** in all, the address unavailable for **4 min 46 s**
+  (cold backup 9 s, room swap 18 s, pull 159 s, `up` 38 s, healthy 88 s).
+  Before: 6.7 to 14.5 min for a new bot and about 12 min for a restart.
+  Locally (`scripts/hosted-test.sh`): healthy 16-29 s without doctor, 81 s
+  at the first start after an image change (doctor runs once).
+
 - **Start is slow.** From `up -d` to a healthy bot took 276 to 621 s, most of
   it reading a freshly unpacked image; pulling and unpacking the bot image
   took another 4 to 8 minutes. Whatever starts the bot must wait at least 15
