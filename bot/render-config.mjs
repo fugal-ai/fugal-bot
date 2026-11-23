@@ -9,6 +9,14 @@
 // The Telegram token IS in this container's environment; it is never written
 // into the file (the config holds a SecretRef, {source:"env"}, that OpenClaw
 // resolves from the process environment at runtime).
+//
+// Optional settings (all unset = OpenClaw's own defaults, as before):
+//   BOT_DISPLAY_NAME, BOT_EMOJI   agents.entries.<agent>.identity.name / .emoji
+//   UI_ACCENT_COLOR               ui.seamColor (the Control UI's accent colour)
+//   MODEL_INPUT                   models.providers.bot.models[0].input (text | text,image)
+//   MODEL_EXTRA_BODY              agents.defaults.models["bot/<model>"].params.extra_body
+//   BACKGROUND_MODEL_USE=off      plugins.entries.memory-core.config.dreaming.enabled: false
+//   TOOLS_DENY                    tools.deny (default: the tools that cannot work here)
 import fs from "node:fs";
 import path from "node:path";
 
@@ -29,6 +37,14 @@ const intEnv = (name, dflt) => {
   return Number.isFinite(n) && n > 0 ? n : dflt;
 };
 const list = (s) => (s || "").split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+// One line of plain text, at most `max` characters (whole characters: an emoji
+// is never cut in half).
+const oneLine = (s, max) =>
+  Array.from((s || "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim()).slice(0, max).join("").trim();
+function fail(msg) {
+  console.error(`[fugal-bot] ${msg}`);
+  process.exit(2);
+}
 
 function isObj(x) {
   return x && typeof x === "object" && !Array.isArray(x);
@@ -70,6 +86,71 @@ const origins = [uiOrigin, `http://127.0.0.1:${port}`, `http://localhost:${port}
 if (hostname) origins.push(`https://${hostname}`, `https://${hostname}:${port}`);
 
 const execMode = ["full", "ask", "auto"].includes(env.EXEC_MODE) ? env.EXEC_MODE : "full";
+
+// What the model accepts. Text always; "image" only for a model that takes
+// image parts (a text-only model answers HTTP 400 to a request that has one).
+const modelInput = ["text"];
+for (const kind of list(env.MODEL_INPUT).map((x) => x.toLowerCase())) {
+  if (kind === "image") modelInput.push("image");
+  else if (kind !== "text") fail(`MODEL_INPUT: unknown value "${kind}" (use text or text,image)`);
+}
+const modelInputs = [...new Set(modelInput)];
+
+// Extra fields for every model request body, e.g. the switch that turns a
+// model's "thinking" off: {"chat_template_kwargs":{"enable_thinking":false}}.
+// OpenClaw merges params.extra_body into each openai-completions request last,
+// so it wins over fields OpenClaw generates itself.
+let extraBody;
+if ((env.MODEL_EXTRA_BODY || "").trim()) {
+  try {
+    extraBody = JSON.parse(env.MODEL_EXTRA_BODY);
+  } catch (e) {
+    fail(`MODEL_EXTRA_BODY is not valid JSON (${e.message})`);
+  }
+  if (!isObj(extraBody)) fail("MODEL_EXTRA_BODY must be a JSON object, e.g. {\"chat_template_kwargs\":{\"enable_thinking\":false}}");
+  for (const k of ["model", "messages", "tools", "stream"]) {
+    if (k in extraBody) fail(`MODEL_EXTRA_BODY must not set "${k}"`);
+  }
+}
+const modelRef = `${providerId}/${modelName}`;
+
+// What this script applied from the environment last time (no secrets). It
+// lets the name and emoji be defaults rather than forced values: a new value
+// in the environment is applied once, and a later change made in the web UI
+// (Agents page) is kept. It also lets switches be undone when a variable is
+// removed again.
+const appliedPath = path.join(path.dirname(cfgPath), "fugal-bot-applied.json");
+let applied = {};
+try {
+  const a = JSON.parse(fs.readFileSync(appliedPath, "utf8"));
+  if (isObj(a)) applied = a;
+} catch {}
+const nextApplied = {};
+
+const displayName = oneLine(env.BOT_DISPLAY_NAME, 64);
+const emoji = oneLine(env.BOT_EMOJI, 16);
+const accentRaw = (env.UI_ACCENT_COLOR || "").trim();
+if (accentRaw && !/^#?[0-9a-fA-F]{6}$/.test(accentRaw)) fail("UI_ACCENT_COLOR must be a hex colour like #2f6fed");
+const accent = accentRaw ? `#${accentRaw.replace(/^#/, "").toLowerCase()}` : "";
+const backgroundOff = (env.BACKGROUND_MODEL_USE || "").trim().toLowerCase() === "off";
+
+// Tools that cannot do anything in this package, taken out of the list the
+// model is sent with every request (measured on v2026.11.6: about 8,200
+// characters less per request, most of it the github_publish schema):
+//   paired devices (none can be paired here), voice and meeting capture (no
+//   provider), publishing to GitHub (no GitHub identity), plugin installs and
+//   self-written skills (both blocked below).
+// Reading public GitHub (github_read, github_search) stays. TOOLS_DENY
+// replaces the list; TOOLS_DENY=none denies nothing.
+const DEFAULT_TOOLS_DENY = [
+  "canvas", "nodes", "node_inference", "mobile_ui", "dir_fetch", "dir_list", "file_fetch", "file_write",
+  "talk_voice", "tts", "transcripts",
+  "github_publish", "github_identity_status",
+  "plugins", "skill_workshop",
+];
+const toolsDenyRaw = (env.TOOLS_DENY || "").trim();
+const toolsDeny = toolsDenyRaw.toLowerCase() === "none" ? [] : toolsDenyRaw ? list(toolsDenyRaw) : DEFAULT_TOOLS_DENY;
+for (const t of toolsDeny) if (!/^[A-Za-z0-9_.:*-]{1,80}$/.test(t)) fail(`TOOLS_DENY: "${t}" is not a tool name`);
 
 const managed = {
   gateway: {
@@ -118,13 +199,20 @@ const managed = {
             id: modelName,
             name: modelName,
             reasoning: env.MODEL_REASONING === "true",
-            input: ["text"],
+            input: modelInputs,
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
             contextWindow: intEnv("MODEL_CONTEXT_WINDOW", 32768),
             maxTokens: intEnv("MODEL_MAX_TOKENS", 4096),
             // Small local models (e.g. gemma3:4b on Ollama) reject any request
             // that carries tools; MODEL_SUPPORTS_TOOLS=false keeps plain chat working.
-            compat: { supportsTools: env.MODEL_SUPPORTS_TOOLS !== "false" },
+            compat: {
+              supportsTools: env.MODEL_SUPPORTS_TOOLS !== "false",
+              // OpenClaw then asks for token usage on streamed replies and so
+              // knows how full the context is. The model proxy asks the
+              // endpoint for the same thing (MODELPROXY_STREAM_USAGE, the one
+              // switch for both), so this adds nothing new for the endpoint.
+              supportsUsageInStreaming: env.MODEL_STREAM_USAGE !== "false",
+            },
           },
         ],
       },
@@ -132,7 +220,7 @@ const managed = {
   },
   agents: {
     defaults: {
-      model: { primary: `${providerId}/${modelName}` },
+      model: { primary: modelRef },
       workspace: env.OPENCLAW_WORKSPACE_DIR || "/home/node/workspace",
     },
   },
@@ -140,12 +228,26 @@ const managed = {
   // --- tools: shell + files + browser on this container ---------------------
   tools: {
     exec: { mode: execMode },
+    // Ours plus whatever the owner denied in the web UI; names we put there
+    // at an earlier start and no longer want are taken out again.
+    deny: [
+      ...new Set([
+        ...(Array.isArray(current.tools?.deny) ? current.tools.deny : []).filter(
+          (t) => !(Array.isArray(applied.toolsDeny) ? applied.toolsDeny : []).includes(t),
+        ),
+        ...toolsDeny,
+      ]),
+    ],
   },
   browser: {
     enabled: true,
     headless: false, // visible on the bot's desktop (DISPLAY=:1, watch via noVNC)
     noSandbox: true, // Chromium's own sandbox needs userns, which we do not grant
     executablePath: "/usr/bin/chromium",
+    // Page snapshots (text with element references) in the compact form unless
+    // the agent asks for another: fewer tokens per page than the full form,
+    // and far fewer than a screenshot.
+    snapshotDefaults: { mode: "efficient" },
   },
 
   // The Control UI's built-in Desktop panel shows this container's screen:
@@ -173,6 +275,63 @@ const managed = {
   update: { checkOnStart: false, auto: { enabled: false } },
   telemetry: { enabled: false },
 };
+
+// --- model request extras ------------------------------------------------------
+// Entries for this provider that an earlier start wrote for another model name
+// would otherwise linger: take our field out of all of them first.
+const modelEntries = current.agents?.defaults?.models;
+if (isObj(modelEntries)) {
+  for (const [ref, entry] of Object.entries(modelEntries)) {
+    if (!ref.startsWith(`${providerId}/`) || !isObj(entry) || !isObj(entry.params)) continue;
+    delete entry.params.extra_body;
+    delete entry.params.extraBody;
+    if (!Object.keys(entry.params).length) delete entry.params;
+    if (!Object.keys(entry).length) delete modelEntries[ref];
+  }
+}
+if (extraBody) managed.agents.defaults.models = { [modelRef]: { params: { extra_body: extraBody } } };
+
+if (toolsDeny.length) nextApplied.toolsDeny = toolsDeny;
+
+// --- identity and look (optional) -----------------------------------------------
+// The agent the name belongs to: "main" (OpenClaw's implicit agent) unless the
+// owner replaced it with exactly one agent of another id.
+const agentIds = Object.keys(isObj(current.agents?.entries) ? current.agents.entries : {});
+const agentId = !agentIds.length || agentIds.includes("main") ? "main" : agentIds.length === 1 ? agentIds[0] : "";
+const identityNow = (agentId && current.agents?.entries?.[agentId]?.identity) || {};
+const identity = {};
+for (const [key, value] of [["name", displayName], ["emoji", emoji]]) {
+  if (!value) continue;
+  nextApplied[key] = value;
+  // A default, not a forced value: write it when nothing is set yet or when
+  // the environment value itself changed; otherwise keep what is in the file.
+  if (!identityNow[key] || applied[key] !== value) identity[key] = value;
+}
+if (agentId && Object.keys(identity).length) {
+  managed.agents.entries = { [agentId]: { identity } };
+} else if (!agentId && (displayName || emoji)) {
+  console.error("[fugal-bot] BOT_DISPLAY_NAME / BOT_EMOJI not applied: several agents are configured and none is \"main\"");
+}
+if (accent) {
+  // The operator's accent colour. A colour the user picks under Settings >
+  // Appearance is stored separately (ui.prefs.accent) and wins over this one.
+  managed.ui = { seamColor: accent };
+  nextApplied.accent = accent;
+} else if (applied.accent && current.ui?.seamColor === applied.accent) {
+  delete current.ui.seamColor;
+}
+
+// --- background model use --------------------------------------------------------
+// OpenClaw's memory plugin schedules a nightly "dreaming" job (memory
+// consolidation, cron 0 3 * * *) that calls the model with no user message.
+// BACKGROUND_MODEL_USE=off disables it; OpenClaw then removes the job.
+if (backgroundOff) {
+  managed.plugins = { entries: { "memory-core": { config: { dreaming: { enabled: false } } } } };
+  nextApplied.backgroundOff = true;
+} else if (applied.backgroundOff) {
+  const dreaming = current.plugins?.entries?.["memory-core"]?.config?.dreaming;
+  if (isObj(dreaming) && dreaming.enabled === false) delete dreaming.enabled;
+}
 
 // Earlier versions added a second, test-only provider that the bot reached
 // directly. Every model call now goes through the model proxy; drop it from
@@ -211,7 +370,20 @@ fs.mkdirSync(path.dirname(cfgPath), { recursive: true, mode: 0o700 });
 const tmp = `${cfgPath}.tmp-${process.pid}`;
 fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
 fs.renameSync(tmp, cfgPath);
+try {
+  if (Object.keys(nextApplied).length) {
+    fs.writeFileSync(`${appliedPath}.tmp-${process.pid}`, `${JSON.stringify(nextApplied)}\n`, { mode: 0o600 });
+    fs.renameSync(`${appliedPath}.tmp-${process.pid}`, appliedPath);
+  } else {
+    fs.rmSync(appliedPath, { force: true });
+  }
+} catch (e) {
+  console.error(`[fugal-bot] could not record applied settings (${e.code || e.message}); continuing`);
+}
 console.log(
-  `[fugal-bot] config rendered: model=${providerId}/${modelName} endpoint=${new URL(baseUrl).host} ` +
-    `telegram=${tgToken ? "on" : "off"} exec=${execMode}`,
+  `[fugal-bot] config rendered: model=${modelRef} input=${modelInputs.join("+")} endpoint=${new URL(baseUrl).host} ` +
+    `telegram=${tgToken ? "on" : "off"} exec=${execMode}` +
+    `${displayName ? ` name="${displayName}"` : ""}${accent ? ` accent=${accent}` : ""}` +
+    `${extraBody ? ` extra-body-fields=${Object.keys(extraBody).join(",")}` : ""}` +
+    `${backgroundOff ? " background-model-use=off" : ""} tools-denied=${next.tools.deny.length}`,
 );
