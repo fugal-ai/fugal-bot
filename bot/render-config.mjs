@@ -3,9 +3,12 @@
 // owner changes in the web UI survive, while the keys below are always forced
 // back to our values (model endpoint, auth, marketplace/update/telemetry off).
 //
-// Secrets: the model key and the Telegram token are NEVER written into the
-// file. The config holds SecretRefs ({source:"env"}) that OpenClaw resolves
-// from the process environment at runtime.
+// Secrets: this container does not have the model endpoint's API key at all.
+// MODEL_BASE_URL is the model proxy's internal address and MODEL_API_KEY a
+// placeholder; the modelproxy service adds the real key (../modelproxy/).
+// The Telegram token IS in this container's environment; it is never written
+// into the file (the config holds a SecretRef, {source:"env"}, that OpenClaw
+// resolves from the process environment at runtime).
 import fs from "node:fs";
 import path from "node:path";
 
@@ -102,7 +105,7 @@ const managed = {
     },
   },
 
-  // --- model: any OpenAI-compatible endpoint --------------------------------
+  // --- model: any OpenAI-compatible endpoint, reached via the model proxy ----
   models: {
     mode: "replace",
     providers: {
@@ -171,20 +174,10 @@ const managed = {
   telemetry: { enabled: false },
 };
 
-// --- test only: a scripted, deterministic "brain" that emits tool calls -----
-// (scripts/smoke.sh). Lets the smoke test drive real tools without a paid model.
-const scriptedUrl = (env.SCRIPTED_BRAIN_URL || "").trim();
-if (scriptedUrl) {
-  managed.models.providers.scripted = {
-    baseUrl: scriptedUrl,
-    apiKey: "scripted",
-    api: "openai-completions",
-    models: [{ id: "tools", name: "scripted tool driver (test)", reasoning: false, input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072, maxTokens: 4096 }],
-  };
-} else if (current.models?.providers?.scripted) {
-  delete current.models.providers.scripted;
-}
+// Earlier versions added a second, test-only provider that the bot reached
+// directly. Every model call now goes through the model proxy; drop it from
+// config files written back then.
+if (current.models?.providers?.scripted) delete current.models.providers.scripted;
 
 // --- Telegram: on when a token is present -----------------------------------
 const tgToken = (env.TELEGRAM_BOT_TOKEN || "").trim();

@@ -7,9 +7,10 @@ umask 077
 mkdir -p "$HOME/.openclaw" "$HOME/workspace" "$HOME/Desktop" "$HOME/.config"
 [ -e "$HOME/Desktop/workspace" ] || ln -s "$HOME/workspace" "$HOME/Desktop/workspace"
 
-# Ollama and some local servers accept any key; OpenAI-compatible clients still
-# want one. A real key arrives only through the environment (.env), never the image.
-: "${MODEL_API_KEY:=not-needed}"
+# OpenAI-compatible clients want some key. This container only ever gets a
+# placeholder: the real key stays in the modelproxy service, which replaces
+# the Authorization header of every model request.
+: "${MODEL_API_KEY:=held-by-modelproxy}"
 export MODEL_API_KEY
 : "${NOVNC_LISTEN:=0.0.0.0:6080}"
 export NOVNC_LISTEN

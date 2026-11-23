@@ -1,6 +1,7 @@
 # One bot = this compose application. One published port (the proxy), one
 # persistent volume (botdata), no host bind mounts, no Docker socket, no host
-# network, nothing privileged. Start: `cp .env.example .env`, edit, then
+# network, nothing privileged. The model API key lives only in the modelproxy
+# service, never in the bot. Start: `cp .env.example .env`, edit, then
 # `docker compose up -d --build`.
 name: ${BOT_NAME:-fugal-bot}
 
@@ -15,10 +16,11 @@ x-hardening: &hardening
     options: { max-size: "10m", max-file: "3" }
 
 services:
-  # Lays out the one volume on first start: home/ for the bot, proxy/ for TLS state.
+  # Lays out the one volume at every start: home/ for the bot, proxy/ for TLS
+  # state, modelproxy/ for the token counters (each owned by its own user).
   volume-init:
     image: caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
-    entrypoint: ["/bin/sh", "-c", "mkdir -p /v/home /v/proxy && chown 1000:1000 /v/home && chmod 700 /v/home && chown 1001:1001 /v/proxy && chmod 700 /v/proxy"]
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /v/home /v/proxy /v/modelproxy && chown 1000:1000 /v/home && chmod 700 /v/home && chown 1001:1001 /v/proxy && chmod 700 /v/proxy && chown 1002:1002 /v/modelproxy && chmod 700 /v/modelproxy"]
     user: "0:0"
     network_mode: none
     cap_drop: [ALL]
@@ -40,16 +42,19 @@ services:
     depends_on:
       volume-init:
         condition: service_completed_successfully
+      modelproxy:
+        condition: service_healthy
     environment:
-      MODEL_BASE_URL: ${MODEL_BASE_URL:?set MODEL_BASE_URL in .env}
-      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      # The agent never gets the model endpoint's key: it talks to the
+      # modelproxy service, which adds the real key (see SECURITY-NOTES.md).
+      MODEL_BASE_URL: http://modelproxy:9001/v1
+      MODEL_API_KEY: held-by-modelproxy   # a placeholder, not a secret
       MODEL_NAME: ${MODEL_NAME:?set MODEL_NAME in .env}
       MODEL_CONTEXT_WINDOW: ${MODEL_CONTEXT_WINDOW:-32768}
       MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-4096}
       MODEL_REASONING: ${MODEL_REASONING:-false}
       MODEL_SUPPORTS_TOOLS: ${MODEL_SUPPORTS_TOOLS:-true}
       ENABLE_OPENAI_API: ${ENABLE_OPENAI_API:-true}
-      SCRIPTED_BRAIN_URL: ${SCRIPTED_BRAIN_URL:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:-}
       EXEC_MODE: ${EXEC_MODE:-full}
@@ -68,14 +73,56 @@ services:
     networks:
       front:
         ipv4_address: ${FRONT_NET:-10.213.57}.11
-    # Lets the bot reach a model server on this host (the stage-0 Ollama test).
-    # Remove on a server that runs no local model (see SECURITY-NOTES.md).
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      modelnet: {}
     shm_size: "1gb"
     mem_limit: ${BOT_MEM_LIMIT:-2560m}
     cpus: ${BOT_CPUS:-2.0}
     pids_limit: 1024
+
+  # The only holder of the model endpoint and its API key. The bot reaches it
+  # on the internal "modelnet" network; it adds the key, counts tokens and
+  # enforces the optional budget. No published port; not behind the proxy.
+  modelproxy:
+    <<: *hardening
+    build:
+      context: ./modelproxy
+    image: ${MODELPROXY_IMAGE:-fugal-bot-modelproxy:stage0}
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    environment:
+      MODEL_BASE_URL: ${MODEL_BASE_URL:?set MODEL_BASE_URL in .env}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      # Optional hard caps (empty or 0 = no limit); see .env.example.
+      BUDGET_TOKENS_PER_DAY: ${BUDGET_TOKENS_PER_DAY:-}
+      BUDGET_TOKENS_TOTAL: ${BUDGET_TOKENS_TOTAL:-}
+      BUDGET_PRICES: ${BUDGET_PRICES:-}
+      BUDGET_USD_PER_DAY: ${BUDGET_USD_PER_DAY:-}
+      BUDGET_USD_TOTAL: ${BUDGET_USD_TOTAL:-}
+      BUDGET_REQUESTS_PER_MINUTE: ${BUDGET_REQUESTS_PER_MINUTE:-}
+      MODELPROXY_STREAM_USAGE: ${MODELPROXY_STREAM_USAGE:-true}
+      # How a call is answered once a cap is reached (see docs/MODELPROXY.md).
+      MODELPROXY_EXHAUSTED_REPLY: ${MODELPROXY_EXHAUSTED_REPLY:-}
+    volumes:
+      - type: volume
+        source: botdata
+        target: /data
+        volume:
+          subpath: modelproxy
+    networks: [modelnet, modelegress]
+    # Lets the model proxy reach a model server on this host (the stage-0
+    # Ollama test). Remove on a server that runs no local model.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "python3", "-I", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9001/healthz',timeout=3)"]
+      interval: 5s   # short: the bot waits for this service to be healthy
+      timeout: 5s
+      retries: 3
 
   gate:
     <<: *hardening
@@ -206,6 +253,11 @@ networks:
   # proxy <-> gate. No outbound access at all.
   gatenet:
     internal: true
+  # bot <-> modelproxy. No outbound access; the public proxy is not on it.
+  modelnet:
+    internal: true
+  # modelproxy -> the model endpoint (outbound).
+  modelegress: {}
   # proxy <-> optional tunnel (cloudflared needs outbound to Cloudflare).
   tunnelnet:
     ipam:

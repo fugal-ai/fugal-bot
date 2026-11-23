@@ -1,23 +1,23 @@
 # TEST ONLY overlay used by scripts/smoke.sh: adds the scripted tool-calling
-# "brain" on its own internal network (never on the proxy's "front" network).
+# "brain" as a stand-in model endpoint. It sits on its own internal network
+# with the model proxy only: like a real endpoint, the bot reaches it through
+# the model proxy and in no other way.
 services:
   brain:
     build:
       context: ./scripts/scripted-brain
-    image: fugal-bot-scripted-brain:test
+    image: ${BRAIN_IMAGE:-fugal-bot-scripted-brain:test}
+    environment:
+      # Set by smoke.sh to the stand-in API key; the brain then refuses any other.
+      BRAIN_EXPECT_KEY: ${SMOKE_CANARY_KEY:-}
     networks: [smokenet]
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: 64m
     cpus: 0.25
-  bot:
-    environment:
-      SCRIPTED_BRAIN_URL: http://brain:11500/v1
-    networks:
-      front:
-        ipv4_address: ${FRONT_NET:-10.213.57}.11
-      smokenet: {}
+  modelproxy:
+    networks: [smokenet]   # added to its own two networks
     depends_on: [brain]
 
 networks:

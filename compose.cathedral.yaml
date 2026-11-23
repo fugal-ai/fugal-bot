@@ -12,13 +12,15 @@
 #
 # Loopback ports used (must be free on the host):
 #   PORT (default 8080) proxy, the one public entry  | 8081 proxy health
-#   9000 password gate | 18789 agent gateway (+ OpenClaw's own loopback ports
-#   just above it, e.g. 18790-18800 for the browser) | 6080 noVNC | 5900 VNC
-#   2000 cloudflared metrics (tunnel URL)
+#   9000 password gate | 9001 model proxy | 18789 agent gateway (+ OpenClaw's
+#   own loopback ports just above it, e.g. 18790-18800 for the browser)
+#   6080 noVNC | 5900 VNC | 2000 cloudflared metrics (tunnel URL)
 #
-# Security difference from the default layout: the gateway must accept the
+# Security differences from the default layout: the gateway must accept the
 # proxy's identity header from 127.0.0.1, so ANY process on the host network
-# (including the agent's own shell) could send it. See SECURITY-NOTES.md.
+# (including the agent's own shell) could send it; and the model proxy can be
+# called by every process on the host network, not only by the agent (the key
+# itself stays inside the model proxy's container). See SECURITY-NOTES.md.
 
 # Written out in every service (not as a YAML anchor): Compose 2.33, the
 # version in Cathedral rooms, ignores `!reset` inside a merged anchor.
@@ -36,9 +38,9 @@ services:
       # apt-get in the build needs the internet; only the host network has it
       # there. (Other images need no network while building.)
       network: host
-    extra_hosts: !reset []
     hostname: !reset null   # not allowed together with the host network
     environment:
+      MODEL_BASE_URL: http://127.0.0.1:9001/v1   # the model proxy (below)
       GATEWAY_BIND: loopback
       NOVNC_LISTEN: 127.0.0.1:6080
       PROXY_IP: 127.0.0.1
@@ -46,6 +48,16 @@ services:
     volumes: !override
       - ${DATA_DIR:?set DATA_DIR}/home:/home/node
     mem_limit: ${BOT_MEM_LIMIT:-4g}
+
+  modelproxy:
+    network_mode: host
+    networks: !reset null
+    extra_hosts: !reset []
+    environment:
+      MODELPROXY_LISTEN_HOST: 127.0.0.1
+      MODELPROXY_LISTEN_PORT: "9001"
+    volumes: !override
+      - ${DATA_DIR:?set DATA_DIR}/modelproxy:/data
 
   gate:
     network_mode: host
