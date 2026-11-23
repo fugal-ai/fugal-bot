@@ -89,8 +89,74 @@ or `Retry-After` in seconds or as a date), else 1, 2, 4 seconds, and then
 repeats the call. `MODELPROXY_UPSTREAM_RETRIES` is the number of repeats
 (default 3 in gateway mode, 0 in room mode, where the bot's own key is in
 use and the answer is passed through as it is). `MODELPROXY_RETRY_MAX_WAIT`
-(default 30 seconds) bounds the waiting in total: a wait that would pass it
-is not started. A reply that has begun is never repeated.
+(default 10 seconds; it was 30) bounds the waiting in total: a wait that would
+pass it is not started. A reply that has begun is never repeated. Every wait
+is logged with its length and the total so far (`upstream 429; waiting 6.0s
+before asking again (1 of 3, 6.0s of 10s)`), and so is a wait not started
+(`not waiting 6.0s more (over the 10s bound)`).
+
+## Time limits: an answer that does not start, or stops
+
+Seen on the production gateway (2026-11-23, DeepSeek-V4-Flash on Chutes, all
+HTTP 200, no 429 or 503): calls that took 30-107 s for a few output tokens
+(`prompt=201 completion=6 107.1s`), one held 492 s until the user gave up
+(resent, it answered in 11 s). Normal first tokens came after 2-9 s; in 54
+recorded turns of a real bot the first byte came after 1.2-14 s, once 32.9 s.
+
+- **No first byte** (for a stream: no `data:` event; comments do not count)
+  within `MODELPROXY_FIRST_BYTE_TIMEOUT` seconds (default 30): the attempt is
+  given up and the same request sent once more, waiting 1.5 times as long
+  (45 s). If that one does not start either, the client gets a 504
+  (`upstream_timeout`, "The model did not start to answer in time Please send
+  your message again"), or, inside a held stream whose head a keep-alive
+  comment already sent, the same error as an SSE `data:` event. The longest
+  silence is so about 10 s of 429 waits + 30 s + 45 s = 85 s, inside
+  OpenClaw's ~120 s idle limit. 30 s keeps the slowest normal start seen
+  (32.9 s, once) at the cost of one fast retry and bounds the 60-107 s cases.
+  The given-up attempt's cost is not known (an upstream may bill a prompt it
+  never answered): it is counted, not priced. 0 switches this off.
+- **Stall**: no byte at all for `MODELPROXY_STALL_TIMEOUT` seconds (default
+  60) after the answer started. If nothing of it has gone out (a held
+  tool-call answer), it counts as broken ("the answer was cut off") and is
+  asked again under the tool-call rule below; if part of it has gone out, the
+  stream to the client is closed at once so OpenClaw fails fast instead of
+  waiting, and it is logged (`the answer stalled (no byte for 60s) after part
+  of it had gone out`). 0 = off (the old `MODELPROXY_UPSTREAM_TIMEOUT`, 600 s,
+  applies).
+- **Not twice.** A room proxy whose key is a gateway token (`fbk_...`: its
+  upstream is a Fugal gateway) leaves both limits off unless they are set
+  explicitly, so the gateway's retry is not doubled by the room's.
+- Pass-through answers now get their status line with their first byte
+  rather than when the upstream's head arrives, so an attempt that never
+  starts can still be given up.
+- Every request line in the log ends with its time to the first byte
+  (`ttfb=2.3s`, from the request's arrival, retries included) and, when it
+  happened, `first-byte-retries=1`; given-up waits have lines of their own
+  (`no first byte in 30s; asking again (waiting up to 45s)`).
+
+Counters (every counter row, as below): `first_byte_timeouts` (attempts given
+up), `first_byte_retries` (requests asked again because of one),
+`first_byte_failures` (requests answered 504 after the second wait),
+`stalls` (answers that stopped part way).
+
+## Request records: one line per request, no content
+
+Each request that went upstream (answered or not) adds one JSON line to
+`requests-<UTC day>.jsonl` in the data directory (mode 600): `ts` (arrival,
+Unix seconds), `route`, `model`, `status`, `stream`, `duration_s`, `ttfb_s`,
+`prompt_tokens`, `cached_prompt_tokens`, `completion_tokens`, `usd`,
+`estimated`, `malformed`, `malformed_retried`, `discarded_usd`,
+`first_byte_timeouts`, `stalled`, `interrupted`, `error`, and in a gateway
+`tenant`. Never a body, header, key or token. Kept
+`MODELPROXY_REQUEST_LOG_DAYS` days (default 35); a day's file stops growing
+at `MODELPROXY_REQUEST_LOG_MB` (default 20, noted once in the log). Read
+them, oldest first, at most `limit` (1-5000, default 200, the newest):
+
+- room: `GET /usage/requests?since=<unix seconds>&limit=N`
+- gateway (admin listener only): `GET /admin/requests?tenant=<id>&since=&limit=`
+
+This is what a "what did this task cost" view needs: the requests of a turn
+are the lines between its start and end.
 
 ## Broken tool calls: asked again before the agent sees them
 
@@ -113,6 +179,21 @@ unescaping) or in the text of the answer; finish reason `length` with a tool
 call; a stream that carries a tool call and ends without `data: [DONE]` or
 without a finish reason; a stream that breaks off while held. Ordinary `<`,
 `|`, `>` and a lone `｜` in a command are not markup.
+
+Also broken: **degenerate text in any string of the arguments** (a model
+that has started to loop or to produce garbage), kept narrow:
+a unit of 2-80 characters with at least 2 letters repeated 16 times or more
+in a row and 80 characters or more in all (`the the the ...`, the same line
+again and again; data literals such as `null,` or `NaN, ` do not count);
+one letter 60 times or more in a row, except inside a token with digits,
+`+`, `/` or `=` (base64 and hex blobs); a word of 6 letters or more mixing
+three scripts or more (Latin, CJK with kana, Hangul, Cyrillic, Arabic,
+Hebrew, Thai, Devanagari; Greek is left out for maths, and two scripts in a
+word, as in `使用Python` or Japanese, are normal). Tested not to fire on
+commands, JSON, base64, hex, URLs, CSV, markdown tables, separator lines,
+Chinese, Japanese or Arabic text, emoji and `xxxx` placeholders. A false
+alarm costs at most the retries: when every attempt looks the same, the last
+is passed on. Only the first 64 KB of each string is looked at.
 
 **Held back, not delayed more than needed.**
 

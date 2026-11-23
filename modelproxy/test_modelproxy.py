@@ -33,7 +33,7 @@ LOGS = []
 mp.log = LOGS.append
 
 
-NOT_FINAL = ("asking again", "malformed answer", "passed on")
+NOT_FINAL = ("asking again", "malformed answer", "passed on", "the answer stalled", "not waiting")
 
 
 def wait_logs(n):
@@ -454,7 +454,8 @@ class Metering(Base):
         self.assertEqual(u["days"]["2026-11-22"]["total_tokens"], 36)
         with open(os.path.join(self.tmp.name, "usage.json"), encoding="utf-8") as f:
             self.assertNotIn(REAL_KEY, f.read())
-        self.assertEqual(sorted(os.listdir(self.tmp.name)), ["usage.json"])
+        self.assertEqual(sorted(os.listdir(self.tmp.name)),
+                         ["requests-2026-11-22.jsonl", "requests-2026-11-23.jsonl", "usage.json"])
 
     def test_unreadable_usage_file_is_kept_aside(self):
         with open(os.path.join(self.tmp.name, "usage.json"), "w", encoding="utf-8") as f:
@@ -1390,7 +1391,8 @@ class GatewayPersistence(GatewayBase):
         r = self.report()
         self.assertEqual((r["tenants"][self.BOB]["day"]["requests"], r["platform"]["day"]["requests"]), (2, 4))
         self.assertEqual(sorted(os.listdir(self.tmp.name)),
-                         ["gateway-usage-2026-11-22.json", "gateway-usage-2026-11-23.json", "tenants.json"])
+                         ["gateway-usage-2026-11-22.json", "gateway-usage-2026-11-23.json",
+                          "requests-2026-11-22.jsonl", "requests-2026-11-23.jsonl", "tenants.json"])
         self.assertEqual(os.stat(os.path.join(self.tmp.name, "tenants.json")).st_mode & 0o777, 0o600)
 
     def test_empty_until_the_first_table(self):
@@ -1913,6 +1915,281 @@ class RoomBehindGatewayMalformed(RoomProxyBehindGateway):
         self.assertEqual(len(Upstream.seen), 3)                      # not 3 x 3
         self.assertEqual(self.usage()["total"]["malformed_detected"], 0)    # the room proxy did not check again
         self.assertEqual(self.report()["tenants"][self.ALICE]["day"]["malformed_forwarded"], 1)
+
+
+# ---- degenerate output, request records, time limits ------------------------------------
+def call_with_args(arguments, stream=True):
+    """A tool-call answer whose arguments are `arguments` (a dict, JSON-encoded)."""
+    text = json.dumps(arguments, ensure_ascii=False)
+    return sse(*GOOD_CALL[:1], chunk({"tool_calls": [{"index": 0, "function": {"arguments": text}}]}),
+               chunk({}, "tool_calls"), USAGE_CHUNK)
+
+
+class DegenerateChecks(unittest.TestCase):
+    LEGIT = ["ls -la | grep foo && echo done", "A" * 120 + "/8BAQ==" + base64.b64encode(os.urandom(90)).decode(),
+             "0x" + "0" * 40, "deadbeef" * 8, "https://example.com/a/b/c?x=1&y=2#frag" * 3,
+             "a,b,c\n" + "1,2,3\n" * 40, "| a | b |\n|---|---|\n" + "| 1 | 2 |\n" * 30, "-" * 200, "=" * 200,
+             "#" * 120, "\n" * 300, " " * 500, "使用Python编写程序然后运行它", "مرحبا بالعالم هذا نص عربي",
+             "😀" * 30, "Pythonでプログラムを書く", "null," * 40, "NaN, " * 40, "ghp_" + "x" * 36, "求x的α次方",
+             "Привет мир, hello world", "for i in range(10):\n    print(i)\n" * 3, "ababab", "na na na na hey hey"]
+    BAD = {"H" * 80: "degenerate repetition in a tool call",
+           "the " * 20: "degenerate repetition in a tool call",
+           "My output is getting corrupted. " * 16: "degenerate repetition in a tool call",
+           "ok abcабв中文字abc ok": "mixed-script garbage in a tool call",
+           "xyzЖЖЖ漢字okay": "mixed-script garbage in a tool call"}
+
+    def test_ordinary_text_passes(self):
+        for s in self.LEGIT:
+            self.assertIsNone(mp.degenerate(s), s[:60])
+            self.assertIsNone(check_stream(call_with_args({"command": s})).problem(stream=True), s[:60])
+
+    def test_degenerate_text_is_found_in_any_argument(self):
+        for s, why in self.BAD.items():
+            self.assertEqual(mp.degenerate(s), why, s[:40])
+            self.assertEqual(check_stream(call_with_args({"path": "/tmp/x", "content": {"lines": [s]}})).problem(
+                stream=True), why, s[:40])
+
+    def test_recorded_garbage_is_still_found(self):
+        self.assertEqual(check_stream(fixture("bad-garbage-args.sse")).problem(stream=True),
+                         "tool-call arguments are not valid JSON")
+
+    def test_long_arguments_are_checked_quickly(self):
+        big = "".join(chr(97 + (i * 7919) % 26) + (" " if i % 7 == 0 else "") for i in range(200000))
+        t0 = time.monotonic()
+        self.assertIsNone(mp.degenerate(big))
+        self.assertLess(time.monotonic() - t0, 1.0)
+
+
+class DegenerateRetry(MalformedRetry):
+    """Only the new case; the rest of MalformedRetry runs once, above."""
+
+    def test_a_looping_tool_call_is_asked_again(self):
+        self.answers(call_with_args({"command": "echo " + "the " * 30}), fixture("good-tool-call.sse"))
+        self.assertEqual(self.ask()[1], fixture("good-tool-call.sse"))
+        self.assertEqual(len(Upstream.seen), 2)
+        self.assertTrue(any("malformed answer (degenerate repetition in a tool call); asking again" in line
+                            for line in LOGS), LOGS)
+
+
+for _name in [n for n in vars(MalformedRetry) if n.startswith("test_")]:
+    setattr(DegenerateRetry, _name, None)
+
+
+class RequestRecords(Base):
+    env = {"BUDGET_PRICES": '{"m": [100, 200, 10]}'}
+
+    def records(self, query=""):
+        return json.loads(self.call("GET", "/usage/requests" + query)[1])["requests"]
+
+    def test_one_line_per_request_without_content(self):
+        self.chat()
+        self.chat(stream=True)
+        recs = self.records()
+        self.assertEqual(len(recs), 2)
+        r = recs[0]
+        self.assertEqual((r["status"], r["route"], r["model"], r["prompt_tokens"], r["completion_tokens"]),
+                         (200, "chat/completions", "m", 11, 7))
+        self.assertAlmostEqual(r["usd"], mp.cost_usd((100, 200, 10), 11, 7), places=8)
+        self.assertEqual(r["ts"], self.now[0])
+        for key in ("duration_s", "ttfb_s", "estimated", "malformed", "malformed_retried", "discarded_usd",
+                    "first_byte_timeouts", "stalled", "interrupted", "error", "stream", "cached_prompt_tokens"):
+            self.assertIn(key, r)
+        self.assertIsNotNone(r["ttfb_s"])
+        with open(os.path.join(self.tmp.name, "requests-2026-11-22.jsonl"), encoding="utf-8") as f:
+            stored = f.read()
+        for secret in self.secrets:
+            self.assertNotIn(secret, stored)
+        self.assertEqual(os.stat(os.path.join(self.tmp.name, "requests-2026-11-22.jsonl")).st_mode & 0o777, 0o600)
+
+    def test_since_and_limit(self):
+        for i in range(5):
+            self.now[0] += 10
+            self.chat()
+        self.assertEqual(len(self.records("?limit=2")), 2)
+        self.assertEqual(self.records("?limit=2")[-1]["ts"], self.now[0])        # the newest
+        self.assertEqual(len(self.records(f"?since={self.now[0] - 15}")), 2)
+        self.assertEqual(len(self.records("?since=nonsense&limit=x")), 5)
+
+    def test_old_days_are_dropped_and_a_full_day_stops_growing(self):
+        self.start({**self.env, "MODELPROXY_REQUEST_LOG_DAYS": "2"})
+        for _ in range(3):
+            self.chat()
+            self.now[0] += 86400
+        self.chat()
+        names = sorted(n for n in os.listdir(self.tmp.name) if n.startswith("requests-"))
+        self.assertEqual(names, ["requests-2026-11-24.jsonl", "requests-2026-11-25.jsonl"])
+        self.start({**self.env, "MODELPROXY_REQUEST_LOG_MB": "0.0005"})        # about 500 bytes
+        for _ in range(5):
+            self.chat()
+        self.assertLess(os.path.getsize(os.path.join(self.tmp.name, "requests-2026-11-25.jsonl")), 600)
+        self.assertEqual(sum("request log for 2026-11-25 is full" in line for line in LOGS), 1)
+
+    def test_a_retried_broken_answer_is_on_the_line(self):
+        MalformedRetry.answers(self, fixture("bad-dsml-2.sse"), fixture("good-tool-call.sse"))
+        self.call("POST", "/v1/chat/completions", {"model": "m", "stream": True, "tools": TOOLS, "messages": [],
+                                                    "stream_options": {"include_usage": True}})
+        r = self.records()[-1]
+        self.assertEqual((r["malformed"], r["malformed_retried"]), (1, 1))
+        self.assertAlmostEqual(r["discarded_usd"], mp.cost_usd((100, 200, 10), *fixture_usage("bad-dsml-2.sse")),
+                               places=8)
+
+
+class GatewayRequestRecords(GatewayBase):
+    def test_per_tenant_records_on_the_admin_listener_only(self):
+        self.ask()
+        self.ask(self.BOB)
+        recs = json.loads(self.admin_call("GET", "/admin/requests")[1])["requests"]
+        self.assertEqual([r["tenant"] for r in recs], [self.ALICE, self.BOB])
+        bob = json.loads(self.admin_call("GET", f"/admin/requests?tenant={self.BOB}")[1])["requests"]
+        self.assertEqual(len(bob), 1)
+        self.assertAlmostEqual(bob[0]["usd"], mp.cost_usd((100, 200, 100), 11, 7), places=8)
+        self.assertEqual(self.call("GET", "/admin/requests")[0].status, 404)       # not on the public listener
+        self.start({"MODELPROXY_ADMIN_TOKEN": "t0ken-for-admin"})
+        self.assertEqual(self.admin_call("GET", "/admin/requests")[0].status, 401)
+
+
+class Timeouts(Base):
+    env = {"MODELPROXY_FIRST_BYTE_TIMEOUT": "0.3", "MODELPROXY_STALL_TIMEOUT": "0.3"}
+
+    def answers(self, *replies):
+        MalformedRetry.answers(self, *replies)
+
+    @staticmethod
+    def late(delay, raw=None, head_first=False):
+        """Answers after `delay` seconds (the head too, unless head_first)."""
+        def reply(h, req):
+            if head_first:
+                h.start_stream()
+                h.wfile.flush()
+            time.sleep(delay)
+            try:
+                if not head_first:
+                    h.start_stream()
+                h.wfile.write(raw or sse(chunk({"content": "hi"}), USAGE_CHUNK))
+            except OSError:
+                pass
+        return reply
+
+    def test_defaults(self):
+        cfg = mp.Config({"MODEL_BASE_URL": "http://x"})
+        self.assertEqual((cfg.first_byte_timeout, cfg.stall_timeout, cfg.retry_max_wait), (30.0, 60.0, 10.0))
+        behind = mp.Config({"MODEL_BASE_URL": "http://gw/v1", "MODEL_API_KEY": new_token("bq4x7k2m9pa")})
+        self.assertEqual((behind.upstream_is_gateway, behind.first_byte_timeout, behind.stall_timeout), (True, 0, 0))
+        explicit = mp.Config({"MODEL_BASE_URL": "http://gw/v1", "MODEL_API_KEY": new_token("bq4x7k2m9pa"),
+                              "MODELPROXY_FIRST_BYTE_TIMEOUT": "20"})
+        self.assertEqual(explicit.first_byte_timeout, 20)
+        gw = mp.Config({"MODEL_BASE_URL": "http://x", "MODELPROXY_MODE": "gateway"})
+        self.assertEqual((gw.first_byte_timeout, gw.stall_timeout), (30.0, 60.0))
+        for bad in ("-1", "x", "inf"):
+            with self.assertRaises(mp.ConfigError):
+                mp.Config({"MODEL_BASE_URL": "http://x", "MODELPROXY_FIRST_BYTE_TIMEOUT": bad})
+
+    def test_no_head_in_time_is_asked_again_once(self):
+        self.answers(self.late(1.0), self.late(0))
+        t0 = time.monotonic()
+        resp, data = self.chat(stream=True)
+        self.assertEqual((resp.status, data), (200, sse(chunk({"content": "hi"}))))
+        self.assertLess(time.monotonic() - t0, 0.9)
+        self.assertEqual(len(Upstream.seen), 2)
+        u = self.usage()["total"]
+        self.assertEqual((u["requests"], u["first_byte_timeouts"], u["first_byte_retries"], u["first_byte_failures"]),
+                         (1, 1, 1, 0))
+        self.assertTrue(any("no first byte in 0.3s; asking again (waiting up to 0.45s)" in line for line in LOGS), LOGS)
+        self.assertTrue(any("ttfb=" in line and "first-byte-retries=1" in line for line in LOGS), LOGS)
+
+    def test_a_head_without_any_data_counts_as_no_first_byte(self):
+        self.answers(self.late(1.0, head_first=True), self.late(0))
+        resp, data = self.chat(stream=True)
+        self.assertEqual((resp.status, data), (200, sse(chunk({"content": "hi"}))))
+        self.assertEqual(self.usage()["total"]["first_byte_retries"], 1)
+
+    def test_twice_too_late_is_a_504_the_user_can_read(self):
+        self.answers(self.late(1.0))
+        resp, data = self.chat(stream=True)
+        err = json.loads(data)["error"]
+        self.assertEqual((resp.status, err["code"]), (504, "upstream_timeout"))
+        self.assertIn("did not start to answer in time", err["message"])
+        self.assertEqual(len(Upstream.seen), 2)
+        u = self.usage()["total"]
+        self.assertEqual((u["requests"], u["first_byte_timeouts"], u["first_byte_failures"]), (0, 2, 1))
+        rec = json.loads(self.call("GET", "/usage/requests")[1])["requests"][-1]
+        self.assertEqual((rec["status"], rec["error"], rec["first_byte_timeouts"]), (504, "first_byte_timeout", 2))
+
+    def test_0_switches_it_off(self):
+        self.start({"MODELPROXY_FIRST_BYTE_TIMEOUT": "0"})
+        self.answers(self.late(0.5))
+        self.assertEqual(self.chat(stream=True)[0].status, 200)
+        self.assertEqual(len(Upstream.seen), 1)
+
+    def test_a_stall_after_the_answer_started_ends_it(self):
+        def reply(h, req):
+            h.start_stream()
+            h.wfile.write(sse(chunk({"content": "The"}), done=False))
+            h.wfile.flush()
+            time.sleep(1.0)
+            try:
+                h.wfile.write(sse(chunk({"content": " end"}), USAGE_CHUNK))
+            except OSError:
+                pass
+        Upstream.reply = reply
+        t0 = time.monotonic()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("POST", "/v1/chat/completions", body=json.dumps({"model": "m", "stream": True, "messages": []}))
+        resp = conn.getresponse()
+        with self.assertRaises(http.client.IncompleteRead):
+            resp.read()
+        conn.close()
+        self.assertLess(time.monotonic() - t0, 0.9)          # ended at the stall limit, not after the upstream
+        wait_logs(1)
+        self.assertEqual(self.usage()["total"]["stalls"], 1)
+        self.assertTrue(any("stalled (no byte for 0s)" in line or "the answer stalled" in line for line in LOGS), LOGS)
+        self.assertEqual(len(Upstream.seen), 1)               # part of it had gone out: never asked again
+
+    def test_a_held_tool_call_that_stalls_is_asked_again(self):
+        def stall(h, req):
+            h.start_stream()
+            h.wfile.write(sse(*GOOD_CALL[:2], done=False))
+            h.wfile.flush()
+            time.sleep(1.0)
+        self.answers(stall, fixture("good-tool-call.sse"))
+        resp, data = self.call("POST", "/v1/chat/completions", {"model": "m", "stream": True, "tools": TOOLS,
+                                                                  "messages": []})
+        self.assertIn(b'"tool_calls"', data)
+        self.assertNotIn(b'"choices":[],"usage"', data)          # the usage chunk the proxy asked for is hidden
+        self.assertTrue(data.endswith(b"data: [DONE]\n\n"))
+        self.assertEqual(len(Upstream.seen), 2)
+        u = self.usage()["total"]
+        self.assertEqual((u["stalls"], u["malformed_retried"]), (1, 1))
+
+    def test_twice_too_late_inside_a_held_stream_ends_with_an_error_event(self):
+        self.cfg.keepalive_seconds = 0.1
+        self.answers(self.late(1.5, head_first=True))
+        resp, data = self.call("POST", "/v1/chat/completions", {"model": "m", "stream": True, "tools": TOOLS,
+                                                                  "messages": []})
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(data.startswith(b": keepalive"))
+        self.assertIn(b'"code": "upstream_timeout"', data)
+        self.assertEqual(len(Upstream.seen), 2)
+
+    def test_busy_upstream_waits_are_bounded_and_logged(self):
+        self.start({"MODELPROXY_UPSTREAM_RETRIES": "3"})
+        UpstreamRetry.busy_then_ok(self, 99, headers=[("Retry-After", "6")])
+        self.assertEqual(self.chat()[0].status, 429)
+        self.assertEqual(self.slept, [6.0])                      # 6 + 6 would pass the 10 s default
+        self.assertTrue(any("upstream 429; waiting 6.0s before asking again (1 of 3, 6.0s of 10s)" in line
+                            for line in LOGS), LOGS)
+        self.assertTrue(any("not waiting 6.0s more (over the 10s bound)" in line for line in LOGS), LOGS)
+
+
+class GatewayTimeouts(GatewayBase):
+    def test_the_gateway_asks_again_and_the_room_proxy_behind_it_does_not_wait_twice(self):
+        self.start({"MODELPROXY_FIRST_BYTE_TIMEOUT": "0.3"})
+        Upstream.reply = Timeouts.late(1.0)
+        resp, data = self.ask(stream=True)
+        self.assertEqual(self.code((resp, data)), (504, "upstream_timeout"))
+        day = self.report()["tenants"][self.ALICE]["day"]
+        self.assertEqual((day["first_byte_timeouts"], day["first_byte_failures"], day["requests"]), (2, 1, 0))
+        self.assertEqual(self.report()["platform"]["day"]["first_byte_retries"], 1)
 
 
 if __name__ == "__main__":
