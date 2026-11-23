@@ -114,7 +114,13 @@ returns nothing delivers nothing. The recipe's script runs the `taoq … --watch
 --text` command, throws if it fails (an error in the run history, never a
 silent miss) and returns `{notify: output}` unless the output is `NO_REPLY`.
 So a quiet check costs 0 model calls and an alert costs 0 too (4 checks a day
-used to be 8 calls). If a gateway turns scripts off (`cron.triggers.enabled:
+used to be 8 calls). **Known wrinkle (measured, forced runs in the container
+test):** on 2026.11.6 the first script run after the gateway process starts
+fails once with "Plugin runtime changed" (4 fresh starts, 4 times; an in-script
+retry does not help); the next run works. A watch can therefore miss one check
+after each restart of the bot. A run started by the scheduler's own timer was
+not observed (the first one is hours away) so it is not known whether it
+behaves the same. If a gateway turns scripts off (`cron.triggers.enabled:
 false`) the recipe falls back to an `agentTurn` that runs the command and
 replies `NO_REPLY` or the output unchanged: 2 calls per check. The container
 tests (`scripts/first-conversation.sh`) run exactly the recipe text from

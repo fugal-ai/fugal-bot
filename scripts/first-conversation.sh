@@ -212,24 +212,37 @@ ok = (j["enabled"] in (1, True) and s.get("expr") == "0 */6 * * *" and s.get("tz
 sys.exit(0 if ok else 1)' "${job:-{\}}" "$hk"
   check "taoq saved the watch's state in the workspace" bot_sh "test -s $state"
 
-  # A quiet check: same chain, nothing new.
+  # A quiet check: same chain, nothing new. OpenClaw 2026.11.6 fails the FIRST script run
+  # after the gateway process starts with "Plugin runtime changed" (seen on every fresh
+  # start, forced runs); the next run works. So the check allows that one failure, says so,
+  # and runs again. Model calls: 2 for each asking turn (run, reply), none for the runs.
   at0=$(fc_watch_state "$state")
   u0=$(usage); r0=$(fc_rows "RESOLVED (was warning)")
+  local asks=1
   reply=$(chat first-run "Run the hotkey watch now: job $wid")
   echo "reply: ${reply:0:240}"
   check "the automations tool queued the run" bash -c '[[ "$0" == *"SCRIPTED-BRAIN RUN-NOW"* && "$0" == *enqueued* ]]' "$reply"
   at1=$(fc_wait_state_change "$state" "$at0") || true
+  if [ -z "$at1" ] || [ "$at1" = "$at0" ]; then
+    job=$(fc_job | grep -a "\"id\":\"$wid\"" | head -1)
+    if [[ "$job" == *"Plugin runtime changed"* ]]; then
+      echo "NOTE: the first script run after the gateway started failed with OpenClaw's 'Plugin runtime changed' (known; the next run works): running it again"
+      asks=2
+      reply=$(chat first-run "Run the hotkey watch now: job $wid")
+      at1=$(fc_wait_state_change "$state" "$at0") || true
+    fi
+  fi
   check "the script job ran and taoq saved a new check ($at0 -> $at1)" test -n "$at1" -a "$at1" != "$at0"
   sleep 3
   u1=$(usage)
-  check "the quiet check made no model call (only the two calls of the asking turn: $(( $(jnum "$u1" total.requests) - $(jnum "$u0" total.requests) )))" \
-    test $(( $(jnum "$u1" total.requests) - $(jnum "$u0" total.requests) )) = 2
+  check "the quiet check made no model call (only the $((2 * asks)) calls of the asking turn(s): $(( $(jnum "$u1" total.requests) - $(jnum "$u0" total.requests) )))" \
+    test $(( $(jnum "$u1" total.requests) - $(jnum "$u0" total.requests) )) = $((2 * asks))
   job=$(fc_job | grep -a "\"id\":\"$wid\"" | head -1)
   st=$(python3 -I -c 'import json,sys
 try: print(json.dumps(json.loads(sys.argv[1])["state"])[:500])
 except Exception: print("?")' "$job")
   echo "job state after the quiet check: $st"
-  check "the run is recorded as ok" python3 -I -c 'import json,sys
+  check "the last run is recorded as ok" python3 -I -c 'import json,sys
 st = json.loads(sys.argv[1])["state"]
 sys.exit(0 if st.get("lastRunStatus", st.get("lastStatus")) == "ok" else 1)' "${job:-{\}}"
 
