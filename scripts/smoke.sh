@@ -9,6 +9,13 @@
 #   the counters survived, and last that a very low budget makes the model
 #   proxy refuse and that the next message is answered once it is raised.
 #
+# Also (bot/seed/, bot/backup.sh, bot/restore.sh): with the scripted brain the
+#   bot gets a name, an emoji, an accent colour, first-run files, a model
+#   extra-body field and BACKGROUND_MODEL_USE=off, and the test checks each of
+#   them (the name in the real web UI); with any brain it takes an encrypted
+#   hot backup to a throwaway local object store, restores it into an empty
+#   volume, and takes a cold backup there (scripts/backup-check.sh).
+#
 # Brain (SMOKE_BRAIN):
 #   scripted (default)  the test-only scripted model (scripts/scripted-brain/)
 #                       is the model proxy's upstream: no paid call, no real
@@ -60,6 +67,20 @@ case "$BRAIN" in
   configured) ;;
   *) echo "SMOKE_BRAIN must be 'scripted' or 'configured'"; exit 2 ;;
 esac
+
+# ---- identity, first-run files, model extras (scripted brain only) -------------
+# Test values; a real bot gets these from .env. Not with a real model: it would
+# act on the first-conversation script instead of answering the test.
+SEED_TEST=0
+if [ "$BRAIN" = scripted ]; then
+  SEED_TEST=1
+  export BOT_DISPLAY_NAME="Smoke Otter" BOT_EMOJI="🦦" UI_ACCENT_COLOR="#2f6fed" SEED_WORKSPACE=1
+  # The well-known "Alice" development address: public, and nobody's wallet.
+  export OWNER_WALLET_SS58=5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
+  export MODEL_INPUT=text MODEL_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false}}'
+  export BACKGROUND_MODEL_USE=off TOOLS_DENY=
+fi
+# --------------------------------------------------------------------------------
 TOOLS=$(envval MODEL_SUPPORTS_TOOLS); TOOLS=${TOOLS:-true}
 # All services in one network namespace (compose.cathedral.yaml)?
 case "${SMOKE_COMPOSE_FILES:-}" in *cathedral*) ONE_NETNS=1 ;; *) ONE_NETNS=0 ;; esac
@@ -143,6 +164,20 @@ wait_mem
 "${DC[@]}" build -q || { echo build failed; exit 1; }
 "${DC[@]}" up -d || exit 1
 check "bot and proxy healthy" wait_healthy
+
+# ---- first-run files as the entrypoint left them, before any conversation ------
+seedfiles() { "${DC[@]}" exec -T bot sh -c 'cd /home/node/workspace 2>/dev/null && sha256sum IDENTITY.md SOUL.md USER.md AGENTS.md BOOTSTRAP.md 2>&1'; }
+seedlog() { "${DC[@]}" logs bot 2>&1 | grep -a 'workspace seed:' | tail -1 | sed 's/.*workspace seed: //'; }
+# pf <output>: count the PASS/FAIL lines a check script printed, show the rest.
+pf() {
+  echo "$1" | grep -v "^PASS\|^FAIL"
+  local line
+  while IFS= read -r line; do
+    case "$line" in PASS*) ok "${line#PASS  }" ;; FAIL*) bad "${line#FAIL  }" ;; esac
+  done <<< "$1"
+}
+SEED_LOG=$(seedlog); SEED_SUMS0=$(seedfiles)
+# --------------------------------------------------------------------------------
 
 # Telegram: only when a token reaches the container. The token is read from
 # the container environment by node; it never appears on a command line.
@@ -237,6 +272,44 @@ while IFS= read -r line; do
   case "$line" in PASS*) ok "${line#PASS  }" ;; FAIL*) bad "${line#FAIL  }" ;; esac
 done <<< "$uiout"
 
+# ---- identity, first-run files, model extras ----------------------------------
+if [ "$SEED_TEST" = 1 ]; then
+  step "identity, first-run files, model extras (BOT_DISPLAY_NAME, SEED_WORKSPACE, MODEL_EXTRA_BODY, BACKGROUND_MODEL_USE)"
+  echo "entrypoint: $SEED_LOG"
+  case "$SEED_LOG" in
+    *"BOOTSTRAP.md=written"*)
+      check "new data directory: all five starter files were seeded" \
+        bash -c '[[ "$0" == "IDENTITY.md=written, SOUL.md=written, USER.md=written, AGENTS.md=written, BOOTSTRAP.md=written" ]]' "$SEED_LOG"
+      boot=$("${DC[@]}" exec -T bot cat /home/node/workspace/BOOTSTRAP.md 2>&1)
+      check "BOOTSTRAP.md opens with the bot's name, says it never asks for a seed phrase or private key, and names the owner's public address" \
+        bash -c '[[ "$0" == *"Hi, I'"'"'m $1 "* && "$0" == *"never ask for your seed phrase or a private key"* && "$0" == *"$2"* && "$0" != *"{{"* ]]' \
+        "$boot" "$BOT_DISPLAY_NAME" "$OWNER_WALLET_SS58"
+      check "after the conversations above OpenClaw has left all five exactly as seeded (BOOTSTRAP.md still waiting)" \
+        test -n "$SEED_SUMS0" -a "$(seedfiles)" = "$SEED_SUMS0"
+      ;;
+    *) echo "(not a new data directory, so BOOTSTRAP.md was not seeded at this start; --fresh checks the first-run files)" ;;
+  esac
+  blog=$("${DC[@]}" logs brain 2>&1)
+  with=$(grep -a -c 'extra_fields={"chat_template_kwargs":{"enable_thinking":false}}' <<< "$blog")
+  without=$(grep -a -c 'extra_fields=none' <<< "$blog")
+  check "every model request so far carried the MODEL_EXTRA_BODY field ($with with it, $without without)" test "$with" -gt 0 -a "$without" = 0
+  jobs=$("${DC[@]}" exec -T bot node -e '
+const { DatabaseSync } = require("node:sqlite");
+try {
+  const db = new DatabaseSync("/home/node/.openclaw/state/openclaw.sqlite", { readOnly: true });
+  const all = db.prepare("select name, declaration_key from cron_jobs").all();
+  const dreaming = all.filter((j) => /dreaming/i.test((j.name || "") + " " + (j.declaration_key || "")));
+  console.log("scheduled jobs: " + all.length + ", dreaming: " + dreaming.length);
+} catch (e) { console.log("could not read the job table: " + e.message); }' 2>/dev/null)
+  check "BACKGROUND_MODEL_USE=off: no memory \"dreaming\" job is scheduled ($jobs)" bash -c '[[ "$0" == *", dreaming: 0" ]]' "$jobs"
+  idout=$(ACCESS_PASSWORD="$PW" UI_BASE="$UI_BASE" UI_EXPECT_NAME="$BOT_DISPLAY_NAME" UI_EXPECT_EMOJI="$BOT_EMOJI" UI_EXPECT_ACCENT="$UI_ACCENT_COLOR" \
+    timeout 240 docker run --rm -i --network "$UI_NET" --memory 1g --cap-drop ALL --security-opt no-new-privileges \
+    -e ACCESS_PASSWORD -e UI_BASE -e UI_EXPECT_NAME -e UI_EXPECT_EMOJI -e UI_EXPECT_ACCENT --entrypoint node "$BOT_IMG" --input-type=module - \
+    < scripts/ui-identity-check.mjs 2>&1)
+  pf "$idout"
+fi
+# --------------------------------------------------------------------------------
+
 step "desktop view (noVNC) through the proxy"
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" "$BASE/desktop/vnc.html")
 check "noVNC page served (got $code)" test "$code" = 200
@@ -305,6 +378,59 @@ check "conversation stored on the volume" test -n "$hits"
 reply=$(chat smoke-memory "What was the code word I asked you to remember? Answer with just the code word.")
 echo "reply: ${reply:0:300}"
 check "model recalls the code word after restart" bash -c '[[ "$0" == *PELICAN-42* || "$0" == *"PELICAN 42"* || "$0" == *Pelican-42* ]]' "$reply"
+
+# ---- first-run files after the restart ------------------------------------------
+if [ "$SEED_TEST" = 1 ]; then
+  step "first-run files after the restart"
+  seedlog2=$(seedlog); echo "entrypoint: $seedlog2"
+  check "the second start wrote none of them again" \
+    bash -c '[[ "$0" == "IDENTITY.md=kept, SOUL.md=kept, USER.md=kept, AGENTS.md=kept, BOOTSTRAP.md="* && "$0" != *written* ]]' "$seedlog2"
+  check "and they are byte for byte what they were before the first conversation" test "$(seedfiles)" = "$SEED_SUMS0"
+fi
+
+# ---- backup and restore ----------------------------------------------------------
+# A throwaway age key, a throwaway object store on loopback inside the bot's
+# container (no cloud), and for the restore a throwaway container with an
+# empty volume and no network (scripts/backup-check.sh).
+step "backup: encrypted hot backup of the running bot, restore into an empty volume, cold backup (bot/backup.sh, bot/restore.sh)"
+BK=$(mktemp -d) || exit 1
+chmod 700 "$BK"
+docker run --rm --network none --entrypoint age-keygen "$BOT_IMG" > "$BK/identity.txt" 2>/dev/null
+BK_RECIPIENT=$(grep -a -o 'age1[0-9a-z]*' "$BK/identity.txt" | head -1)
+printf 'backup-canary-%s-%s\n' "$RANDOM" "$RANDOM" > "$BK/canary.txt"
+"${DC[@]}" exec -T bot sh -c 'cat > /home/node/workspace/backup-canary.txt' < "$BK/canary.txt"
+"${DC[@]}" exec -T bot sh -c 'cat > /tmp/object-store.py' < scripts/object-store.py
+"${DC[@]}" exec -d bot python3 -I /tmp/object-store.py 127.0.0.1 18999 /tmp/smoke-store
+sleep 2
+# bkrun <hot|cold> <object name>: the URL goes in on stdin, as the controller sends it.
+bkrun() {
+  printf 'http://127.0.0.1:18999/%s?X-Amz-Signature=smoke-signature\n' "$2" |
+    "${DC[@]}" exec -T -e BACKUP_AGE_RECIPIENT="$BK_RECIPIENT" -e BACKUP_ALLOW_INSECURE_URL=1 bot /opt/fugal-bot/backup.sh "$1" 2>&1
+}
+out=$(bkrun hot hot.tar.age); echo "backup.sh hot -> $out"
+check "hot backup while the gateway runs: one line of JSON, ok" \
+  bash -c '[[ "$0" == "{\"ok\":true,\"kind\":\"hot\","*"}" ]] && [ "$(printf "%s\n" "$0" | wc -l)" = 1 ]' "$out"
+check "it did not print the URL it was given" bash -c '[[ "$0" != *smoke-signature* && "$0" != *18999* ]]' "$out"
+sum=$("${DC[@]}" exec -T bot sha256sum /tmp/smoke-store/hot.tar.age 2>/dev/null | cut -d' ' -f1)
+check "the sha256 it reports is that of the object the store received" bash -c '[ -n "$1" ] && [[ "$0" == *"\"sha256\":\"$1\""* ]]' "$out" "$sum"
+out=$(bkrun cold cold.tar.age)
+check "a cold backup is refused while the bot runs" bash -c '[[ "$0" == *"\"ok\":false"*"the bot is running"* ]]' "$out"
+"${DC[@]}" exec -T bot cat /tmp/smoke-store/hot.tar.age > "$BK/hot.tar.age"
+"${DC[@]}" exec -T bot pkill -f object-store.py
+cp scripts/object-store.py scripts/backup-check.sh "$BK/"
+BK_VOL="${PROJECT}_restoretest"
+docker volume rm -f "$BK_VOL" >/dev/null 2>&1
+docker volume create "$BK_VOL" >/dev/null
+# The same layout compose gives the bot: an empty "home" directory owned by uid 1000.
+docker run --rm --network none -v "$BK_VOL:/v" --user 0:0 --entrypoint sh "$BOT_IMG" -c 'mkdir -p /v/home && chown 1000:1000 /v/home && chmod 700 /v/home'
+bkout=$(tar -C "$BK" -cf - . | timeout 300 docker run --rm -i --network none --memory 1g --cap-drop ALL --security-opt no-new-privileges \
+  --mount "type=volume,src=$BK_VOL,dst=/home/node,volume-subpath=home" -e BACKUP_AGE_RECIPIENT="$BK_RECIPIENT" \
+  --entrypoint bash "$BOT_IMG" -c 'mkdir /tmp/in && tar -xf - -C /tmp/in && exec bash /tmp/in/backup-check.sh /tmp/in' 2>&1)
+pf "$bkout"
+check "the restore checks ran to the end" bash -c '[[ "$0" == *"--force replaced what was there"* ]]' "$bkout"
+docker volume rm -f "$BK_VOL" >/dev/null 2>&1
+[ -d "$BK" ] && rm -rf -- "$BK"
+# --------------------------------------------------------------------------------
 
 # Last on purpose: a refusal changes how the agent treats its model provider.
 # With the default reply (MODELPROXY_EXHAUSTED_REPLY=400) the next call goes
