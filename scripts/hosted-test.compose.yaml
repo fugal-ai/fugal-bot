@@ -1,0 +1,78 @@
+# TEST ONLY, used by scripts/hosted-test.sh on top of
+#   compose.yaml : compose.cathedral.yaml : compose.hosted.yaml : scripts/smoke.compose.yaml
+# It runs the HOSTED layout on an ordinary Docker host without using the real
+# host network: every service joins one shared network namespace (the "netns"
+# container), so they reach each other on 127.0.0.1:<port> exactly as in a
+# room. Unlike scripts/loopback-test.compose.yaml it leaves the data where the
+# hosted layout puts it, in bind mounts under DATA_DIR, because the backup and
+# restore one-shots are tested against exactly those mounts.
+#
+# Added for the test: "store", a throwaway object store on loopback that
+# stands in for the presigned-URL storage (scripts/object-store.py).
+x-shared: &shared
+  network_mode: "service:netns"
+  networks: !reset []
+
+services:
+  netns:
+    image: caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    entrypoint: ["sleep", "infinity"]
+    networks: [loopnet]
+    ports:
+      - "127.0.0.1:${PORT:-8080}:${PORT:-8080}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 32m
+
+  bot:
+    <<: *shared
+    build:
+      context: ./bot
+      network: default   # test host: never build with the host network
+    depends_on: [netns]
+    mem_limit: 2560m
+  modelproxy:
+    <<: *shared
+    depends_on: [netns]
+  gate:
+    <<: *shared
+    depends_on: [netns]
+  proxy:
+    <<: *shared
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile.nocap
+      network: default   # test host: never build with the host network
+    environment:
+      # Test only: also listen on the shared namespace's own interface so the
+      # port published by "netns" reaches it. In a room it stays 127.0.0.1.
+      PROXY_LISTEN_HOST: ""
+  brain:
+    <<: *shared
+    depends_on: [netns]
+  tunnel:
+    <<: *shared
+  backup:
+    <<: *shared
+    depends_on: [netns]
+  restore:
+    <<: *shared
+    depends_on: [netns]
+
+  store:
+    <<: *shared
+    image: ${BRAIN_IMAGE:-fugal-bot-scripted-brain:test}   # any image with python3
+    entrypoint: ["python3", "-I", "-u", "/object-store.py", "127.0.0.1", "18999", "/store"]
+    user: "${HOSTED_TEST_UID:?set by scripts/hosted-test.sh}"
+    depends_on: [netns]
+    volumes:
+      - ${HOSTED_TEST_STORE_SCRIPT:?set by scripts/hosted-test.sh}:/object-store.py:ro
+      - ${HOSTED_TEST_STORE_DIR:?set by scripts/hosted-test.sh}:/store
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.25
+
+networks:
+  loopnet: {}

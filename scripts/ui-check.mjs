@@ -14,6 +14,9 @@
 // is the stand-in for the site and for what ends TLS). Added checks: what the
 // frame does without a session, the cookie, who may frame the bot, what a
 // sibling host can do with the user's cookie, sign-out.
+// With UI_EXPECT_NAME (and optionally UI_EXPECT_EMOJI, UI_EXPECT_ACCENT) it also
+// checks that the bot's name, emoji and accent colour show in the chat page,
+// wherever that page is (in hosted mode: inside the frame).
 // UI_DESKTOP_WAIT (seconds, default 45) is how long /desktop/ may take to show
 // the screen; raise it for a slow host.
 // Prints PASS/FAIL lines; exits 1 if any check failed.
@@ -40,6 +43,10 @@ const SIBLING = (process.env.UI_SSO_SIBLING || "").replace(/\/+$/, ""); // anoth
 const STRANGER = (process.env.UI_SSO_STRANGER || "").replace(/\/+$/, ""); // another site
 const BOT_ID = process.env.GATE_BOT_ID || "";
 const COOKIE = "__Host-pb_session";
+// ---- identity (optional) ----------------------------------------------------------
+const NAME = process.env.UI_EXPECT_NAME || "";
+const EMOJI = process.env.UI_EXPECT_EMOJI || "";
+const ACCENT = (process.env.UI_EXPECT_ACCENT || "").toLowerCase();
 let failed = 0;
 const pass = (m) => console.log(`PASS  ${m}`);
 const fail = (m) => { console.log(`FAIL  ${m}`); failed++; };
@@ -103,6 +110,34 @@ function wsProbe(cookie, origin) {
 }
 
 const isOriginError = (s) => /origin/i.test(s);
+
+// The name, emoji and accent colour from the environment, as the chat page
+// shows them. They arrive over the websocket shortly after the page connects.
+async function identityChecks(page, view) {
+  const where = SSO ? "in the frame, " : "";
+  let seen = {};
+  for (let i = 0; i < 20; i++) {
+    seen = await view.evaluate(() => ({
+      title: document.title,
+      text: document.body.innerText,
+      html: document.documentElement.outerHTML,
+      accent: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim().toLowerCase(),
+    })).catch(() => ({ title: "", text: "", html: "", accent: "" }));
+    if (seen.title.includes(NAME) && seen.text.includes(NAME)) break;
+    await page.waitForTimeout(1500);
+  }
+  console.log(`      chat page title: "${seen.title}"; accent: ${seen.accent}`);
+  if (seen.title.includes(NAME) && seen.text.includes(NAME)) pass(`browser: ${where}the web chat shows the bot's name ("${NAME}") in the page title and on the page`);
+  else fail(`browser: ${where}the web chat does not show the name "${NAME}"`);
+  if (EMOJI) {
+    if (seen.html.includes(EMOJI)) pass(`browser: ${where}the bot's emoji (${EMOJI}) is on the page`);
+    else fail(`browser: ${where}the emoji ${EMOJI} is not on the page`);
+  }
+  if (ACCENT) {
+    if (seen.accent === ACCENT) pass(`browser: ${where}the accent colour is ${ACCENT}`);
+    else fail(`browser: ${where}the accent colour is "${seen.accent}", expected ${ACCENT}`);
+  }
+}
 
 // ---- hosted: the bot inside a frame on the site's page ---------------------------------
 // What the site's page does with the reply of its controller: put the one-time
@@ -270,6 +305,7 @@ async function main() {
     } else {
       pass("browser: chat page loaded and connected (no origin error)");
     }
+    if (NAME) await identityChecks(page, view);
     const send = async (text) => { await box.fill(text); await box.press("Enter"); };
     if (MODEL) { await send(`/model ${MODEL}`); await page.waitForTimeout(4000); }
     // A finished assistant turn shows "Done in N seconds" under the reply. A
