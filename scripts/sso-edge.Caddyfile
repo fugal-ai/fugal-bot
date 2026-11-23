@@ -1,0 +1,36 @@
+# TEST ONLY, used by scripts/smoke.sh for the hosted sign-in checks.
+# A stand-in for what sits in front of a hosted bot: HTTPS (here with a
+# throwaway certificate made by Caddy) for
+#   https://fugal.test:8443            the site whose page frames the bot
+#   https://b-smoke.fugal.test:8443    the bot, same-site with it (-> the bot's proxy)
+#   https://other.fugal.test:8443      another host under the same domain (a sibling bot)
+#   https://evil.test:8443             an unrelated site
+# The three pages are the same: a frame and a hidden form, with the attributes
+# the real page uses. The checks drive them from scripts/ui-check.mjs.
+{
+	admin off
+	auto_https disable_redirects
+	skip_install_trust
+}
+
+https://b-smoke.fugal.test:8443 {
+	tls internal
+	reverse_proxy {$SSO_UPSTREAM}
+}
+
+https://fugal.test:8443, https://other.fugal.test:8443, https://evil.test:8443 {
+	tls internal
+	header Content-Type "text/html; charset=utf-8"
+	respond <<HTML
+		<!doctype html>
+		<html lang="en"><head><meta charset="utf-8"><title>stand-in for the page around the bot</title></head>
+		<body>
+		<iframe id="botFrame" name="fugalbot" title="bot" width="1280" height="800"
+			allow="clipboard-read; clipboard-write; fullscreen"
+			sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals"></iframe>
+		<form id="botOpen" method="post" hidden>
+			<input type="hidden" name="token"><input type="hidden" name="next">
+		</form>
+		</body></html>
+		HTML 200
+}

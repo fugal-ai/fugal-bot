@@ -8,6 +8,10 @@
 #   agent container, then stop + start and that the file, the conversation and
 #   the counters survived, and last that a very low budget makes the model
 #   proxy refuse and that the next message is answered once it is raised.
+#   In between, the gate and the proxy are restarted once in hosted mode
+#   (GATE_SSO=on, with a throwaway password): sign-in by one-time token, the
+#   bot in a frame on another origin of the same site, who may frame it, what
+#   a sibling host can do with the cookie, sign-out. SMOKE_SSO=0 skips this.
 #
 # Brain (SMOKE_BRAIN):
 #   scripted (default)  the test-only scripted model (scripts/scripted-brain/)
@@ -245,6 +249,140 @@ ws=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" --max-time 4 --http1.1 \
   -H 'Sec-WebSocket-Key: c21va2UtdGVzdC1rZXkxMg==' -H 'Sec-WebSocket-Protocol: binary' \
   "$BASE/desktop/websockify")
 check "desktop websocket upgrades (got $ws)" test "$ws" = 101
+
+# ==== hosted sign-in (GATE_SSO=on) ================================================
+# Self-contained: it restarts the gate and the proxy with a throwaway password
+# in hosted mode, runs its checks, and puts the password gate back.
+if [ "${SMOKE_SSO:-1}" = 1 ]; then
+  step "hosted mode (GATE_SSO=on): sign-in by one-time token, password refused, framing"
+  SSO_PW=$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 43)     # throwaway, never in .env
+  SSO_BOT=b$(head -c 256 /dev/urandom | base64 | tr -dc 'a-z2-7' | head -c 10)
+  SSO_SITE=https://fugal.test:8443            # stand-in for the site (scripts/sso-edge.Caddyfile)
+  SSO_BOT_URL=https://b-smoke.fugal.test:8443 # the bot as a browser reaches it, same-site with the above
+  SSO_TMP=$(mktemp -d)
+  sso_mode() { ACCESS_PASSWORD="$SSO_PW" GATE_SSO=on GATE_BOT_ID="$SSO_BOT" GATE_LOGIN_URL="$SSO_SITE/bot" \
+    GATE_PARENT_ORIGIN="$SSO_SITE" SESSION_HOURS=24 "$@"; }
+  # sso_token [ttl] [bot id] -> a token as the site's controller mints it. The
+  # password is read from the environment, never from a command line.
+  sso_token() { SSO_PW="$SSO_PW" python3 -I -c '
+import base64, hashlib, hmac, os, secrets, sys, time
+signed = "v1.%s.%d.%s" % (sys.argv[2], int(time.time()) + int(sys.argv[1]), secrets.token_hex(16))
+key = hashlib.sha256(b"fugal-bot-gate-sso-v1\0" + os.environ["SSO_PW"].encode()).digest()
+mac = hmac.new(key, signed.encode(), hashlib.sha256).digest()
+print(signed + "." + base64.urlsafe_b64encode(mac).rstrip(b"=").decode())' "${1:-60}" "${2:-$SSO_BOT}"; }
+  # sso_post <token> [Origin or "-" for none] -> HTTP code; reply headers in $SSO_TMP/h, cookie in $JAR
+  sso_post() { local o=(-H "Origin: ${2:-$SSO_SITE}"); [ "${2:-}" = - ] && o=()
+    printf '%s' "$1" | curl -s -o /dev/null -D "$SSO_TMP/h" -c "$JAR" -w '%{http_code}' "${o[@]}" \
+      --data-urlencode token@- --data-urlencode "next=/" "$BASE/_gate/sso"; }
+  # hdr <name> -> the values of that header in the last reply ($SSO_TMP/h), one per line
+  hdr() { tr -d '\r' < "$SSO_TMP/h" | grep -i "^$1:" | sed -E 's/^[^:]*: *//' || true; }
+  # frames_ok <Content-Security-Policy values> <X-Frame-Options value>: every policy
+  # carries our rule, none forbids framing, and there is no X-Frame-Options.
+  frames_ok() { [ -n "$1" ] && [ -z "$2" ] || return 1
+    [ "$(printf '%s\n' "$1" | grep -c -F "frame-ancestors 'self' $SSO_SITE")" = "$(printf '%s\n' "$1" | grep -c .)" ] &&
+      ! printf '%s\n' "$1" | grep -q -F "frame-ancestors 'none'"; }
+
+  sso_mode "${DC[@]}" up -d --no-deps gate proxy 2>&1 | tail -1
+  check "gate and proxy healthy in hosted mode" wait_healthy
+  rm -f "$JAR"
+
+  code=$(curl -s -o "$SSO_TMP/b" -D "$SSO_TMP/h" -w '%{http_code}' -H 'Accept: text/html' "$BASE/")
+  check "no session, browser: a page, not a redirect (got $code, Location: '$(hdr location)')" \
+    bash -c '[ "$0" = 401 ] && [ -z "$1" ] && grep -q "Signing you in" "$2" && ! grep -q "name=\"password\"" "$2"' "$code" "$(hdr location)" "$SSO_TMP/b"
+  check "that page may be framed by this host and $SSO_SITE only: $(hdr content-security-policy | grep -o "frame-ancestors[^;]*" | head -1)" \
+    frames_ok "$(hdr content-security-policy)" "$(hdr x-frame-options)"
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/desktop/")
+  check "no session, not a page: /desktop/ refused (got $code)" test "$code" = 401
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 --http1.1 -H 'Accept: text/html' \
+    -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: c21va2UtdGVzdC1rZXkxMg==' "$BASE/desktop/websockify")
+  check "no session: websocket refused (got $code)" test "$code" = 401
+  code=$(printf '%s' "$SSO_PW" | curl -s -o /dev/null -D "$SSO_TMP/h" -w '%{http_code}' --data-urlencode password@- --data-urlencode "next=/" "$BASE/_gate/login")
+  check "the right password is refused: no password login in hosted mode (got $code)" bash -c '[ "$0" = 403 ] && [ -z "$1" ]' "$code" "$(hdr set-cookie)"
+  # Four refused tokens in this step, on purpose not more: after five from one
+  # address the gate answers 429 to a bad token (gate/test_gate.py covers that).
+  code=$(sso_post "$(sso_token 60 baaaaaaaaaa)")
+  check "a token for another bot is refused (got $code)" test "$code" = 403
+  code=$(sso_post "$(sso_token -5)")
+  check "an expired token is refused (got $code)" test "$code" = 403
+  code=$(sso_post "$(sso_token 3600)")
+  check "a token dated an hour ahead is refused (got $code)" test "$code" = 403
+  tok=$(sso_token)
+  code=$(sso_post "$tok" https://evil.test:8443)
+  check "a good token posted from another origin is refused (got $code)" test "$code" = 403
+  code=$(sso_post "$tok" null)
+  check "... and from an origin of 'null' (got $code)" test "$code" = 403
+  code=$(sso_post "$tok")
+  setc=$(hdr set-cookie)
+  check "the token posted from the site signs in (got $code, Location: $(hdr location))" test "$code" = 303 -a "$(hdr location)" = /
+  echo "cookie: $(printf '%s' "$setc" | sed -E 's/(pb_session=)[^;]*/\1(value)/')"
+  check "cookie: __Host- name, Secure, HttpOnly, SameSite=Strict, Path=/, no Domain" \
+    bash -c '[[ "$0" == *"__Host-pb_session="* && "$0" == *"; Secure"* && "$0" == *"; HttpOnly"* && "$0" == *"; SameSite=Strict"* && "$0" == *"; Path=/;"* && "${0,,}" != *domain* ]]' "$setc"
+  cp "$JAR" "$SSO_TMP/jar"
+  code=$(sso_post "$tok")
+  check "the same token a second time is refused (got $code)" test "$code" = 403
+  cp "$SSO_TMP/jar" "$JAR"
+
+  code=$(curl -s -o "$SSO_TMP/b" -D "$SSO_TMP/h" -w '%{http_code}' -b "$JAR" -H 'Accept: text/html' "$BASE/")
+  check "with the session: control UI served (got $code) $(grep -o '<title>[^<]*</title>' "$SSO_TMP/b" | head -1)" test "$code" = 200
+  echo "its framing headers: $(hdr content-security-policy | grep -o "frame-ancestors[^;]*" | tr '\n' '|') X-Frame-Options: '$(hdr x-frame-options)'"
+  check "control UI: every policy says frame-ancestors 'self' $SSO_SITE; no X-Frame-Options; no frame-ancestors 'none'" \
+    frames_ok "$(hdr content-security-policy)" "$(hdr x-frame-options)"
+  code=$(curl -s -o /dev/null -D "$SSO_TMP/h" -w '%{http_code}' -b "$JAR" "$BASE/desktop/vnc.html")
+  check "desktop page served (got $code)" test "$code" = 200
+  check "desktop page: the same framing rule: $(hdr content-security-policy | grep -o "frame-ancestors[^;]*" | head -1)" \
+    frames_ok "$(hdr content-security-policy)" "$(hdr x-frame-options)"
+  ws_code() { curl -s -o /dev/null -w '%{http_code}' -b "$JAR" --max-time 4 --http1.1 "$@" \
+    -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: c21va2UtdGVzdC1rZXkxMg==' -H 'Sec-WebSocket-Protocol: binary' "$BASE/desktop/websockify"; }
+  ws=$(ws_code -H "Origin: $BASE")
+  check "desktop websocket from the bot's own origin upgrades (got $ws)" test "$ws" = 101
+  ws=$(ws_code -H "Origin: https://other.fugal.test:8443")
+  check "desktop websocket from a sibling host, with the cookie, is refused (got $ws)" test "$ws" = 403
+  ws=$(ws_code -H "Origin: $SSO_SITE")
+  check "... and from the site itself (got $ws)" test "$ws" = 403
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "Origin: https://other.fugal.test:8443" -H 'Content-Type: text/plain' \
+    -d '{"model":"openclaw/default","messages":[{"role":"user","content":"from a sibling host"}]}' "$BASE/v1/chat/completions")
+  check "POST to the bot's API from a sibling host, with the cookie, is refused (got $code)" test "$code" = 403
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H 'Sec-Fetch-Site: same-site' -H 'Sec-Fetch-Mode: no-cors' "$BASE/")
+  check "a same-site request that is not a navigation is refused (got $code)" test "$code" = 403
+
+  step "hosted mode, real browser: the bot in a frame on the site's page, over HTTPS (one model request)"
+  # The stand-in for the site and for what ends TLS in front of the bot.
+  SSO_EDGE="${PROJECT}-sso-edge"
+  PROXY_IMG=$(envval PROXY_IMAGE); PROXY_IMG=${PROXY_IMG:-fugal-bot-proxy:stage0}   # same default as compose.yaml
+  docker rm -f "$SSO_EDGE" >/dev/null 2>&1
+  EDGE_CADDYFILE=$(cat scripts/sso-edge.Caddyfile) SSO_UPSTREAM="${UI_BASE#http://}" \
+    docker run -d --name "$SSO_EDGE" --network "$UI_NET" --network-alias fugal.test --network-alias b-smoke.fugal.test \
+    --network-alias other.fugal.test --network-alias evil.test --memory 128m --cap-drop ALL --security-opt no-new-privileges \
+    --read-only --tmpfs /tmp -e XDG_DATA_HOME=/tmp/data -e XDG_CONFIG_HOME=/tmp/config -e EDGE_CADDYFILE -e SSO_UPSTREAM \
+    --entrypoint /bin/sh "$PROXY_IMG" -c 'printf "%s\n" "$EDGE_CADDYFILE" > /tmp/Caddyfile && exec caddy run --config /tmp/Caddyfile --adapter caddyfile' >/dev/null
+  uiout=$(ACCESS_PASSWORD="$SSO_PW" GATE_BOT_ID="$SSO_BOT" UI_BASE="$UI_BASE" UI_SSO=1 UI_SSO_SITE="$SSO_SITE" UI_SSO_BOT="$SSO_BOT_URL" \
+    UI_SSO_SIBLING=https://other.fugal.test:8443 UI_SSO_STRANGER=https://evil.test:8443 \
+    UI_MESSAGE="Hello! Please reply with one short sentence." \
+    timeout 480 docker run --rm -i --network "$UI_NET" --memory 1g --cap-drop ALL --security-opt no-new-privileges \
+    -e ACCESS_PASSWORD -e GATE_BOT_ID -e UI_BASE -e UI_SSO -e UI_SSO_SITE -e UI_SSO_BOT -e UI_SSO_SIBLING -e UI_SSO_STRANGER -e UI_MESSAGE \
+    --entrypoint node "$BOT_IMG" --input-type=module - < scripts/ui-check.mjs 2>&1)
+  echo "$uiout" | grep -v "^PASS\|^FAIL"
+  while IFS= read -r line; do
+    case "$line" in PASS*) ok "${line#PASS  }" ;; FAIL*) bad "${line#FAIL  }" ;; esac
+  done <<< "$uiout"
+  check "the browser checks ran to the end" bash -c '[[ "$0" == *"GATE_LOGIN_URL"* ]]' "$uiout"
+  docker rm -f "$SSO_EDGE" >/dev/null 2>&1
+
+  step "hosted mode: sign-out, then back to the password gate"
+  code=$(curl -s -o /dev/null -D "$SSO_TMP/h" -w '%{http_code}' -b "$JAR" -c "$JAR" -X POST -H "Origin: $SSO_SITE" "$BASE/_gate/logout")
+  check "POST /_gate/logout clears the cookie (got $code; $(hdr set-cookie))" \
+    bash -c '[ "$0" = 200 ] && [[ "$1" == *"__Host-pb_session=; "*"Max-Age=0"* ]]' "$code" "$(hdr set-cookie)"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" "$BASE/desktop/vnc.html")
+  check "after sign-out the desktop page is refused (got $code)" test "$code" = 401
+  rm -rf "$SSO_TMP"
+  "${DC[@]}" up -d --no-deps gate proxy 2>&1 | tail -1
+  check "gate and proxy healthy again with the password gate" wait_healthy
+  code=$(login)
+  check "password login works again (got $code)" test "$code" = 303
+fi
+# ==== end of hosted sign-in =========================================================
 
 step "the model API key stays out of the agent container"
 "${DC[@]}" exec -T modelproxy printenv MODEL_API_KEY > "$KEYFILE" 2>/dev/null
