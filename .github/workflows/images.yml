@@ -175,9 +175,7 @@ jobs:
           } > bundle/images.env
           # Four lines, each pinned by a full sha256 digest, or no bundle at all.
           test "$(grep -c -E '^[A-Z]+_IMAGE=ghcr\.io/[a-z0-9./-]+@sha256:[0-9a-f]{64}$' bundle/images.env)" = 4
-          cp compose.yaml compose.cathedral.yaml bundle/
-          # compose.hosted.yaml joins the bundle once it exists in the repository.
-          if [ -f compose.hosted.yaml ]; then cp compose.hosted.yaml bundle/; fi
+          cp compose.yaml compose.cathedral.yaml compose.hosted.yaml bundle/
           name="fugal-bot-room-$version.tgz"
           # Same commit, same digests -> the same archive, byte for byte.
           # The files sit at the top level of the archive (no directory entry).

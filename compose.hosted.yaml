@@ -1,0 +1,85 @@
+# Overlay for a HOSTED bot: one of many bots run for their owners by a site
+# (a "controller"), each in its own room, shown in a frame on the site's page.
+# Used on top of compose.yaml and compose.cathedral.yaml (all services on the
+# host network, data under DATA_DIR), and switched on by the profile "hosted":
+#
+#   COMPOSE_FILE=compose.yaml:compose.cathedral.yaml:compose.hosted.yaml
+#   COMPOSE_PROFILES=hosted
+#   docker compose up -d --no-build
+#
+# What changes compared with the quick-tunnel setup:
+#   - "tunnel" becomes a Cloudflare NAMED tunnel (a fixed hostname that the
+#     controller created) instead of a quick tunnel with a random address.
+#     The services of the profile "tunnel" (tunnel-guard, tunnel-url) do not
+#     start, and PUBLIC_HOSTNAME stays empty: the proxy keeps listening on
+#     127.0.0.1:PORT in plain HTTP and TLS ends at Cloudflare.
+#   - Sign-in is by one-time token (GATE_SSO=on and the other GATE_* values in
+#     .env; compose.yaml hands them to the gate and the proxy). This file does
+#     not force it: a named tunnel with the password gate also works.
+#   - "backup" is declared: a one-shot that is never started by `up`.
+#
+# The tunnel's public hostname and where it sends traffic are set on
+# Cloudflare's side (the tunnel's ingress rule), not here: it must point at
+# http://127.0.0.1:<PORT>, the proxy.
+services:
+  tunnel:
+    profiles: !override [hosted]
+    # The token is read by cloudflared from the environment (TUNNEL_TOKEN). It
+    # is never put on the command line, where every process on the host
+    # network could read it (and cloudflared's own /debug/pprof/cmdline on the
+    # metrics port would serve it). The metrics port is bound to loopback.
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:2000", "run", "--protocol", "http2"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN (the named tunnel's token) in .env}
+    # Not the quick tunnel's password check: with GATE_SSO=on the gate itself
+    # refuses to start with a short ACCESS_PASSWORD.
+    depends_on: !override
+      proxy:
+        condition: service_healthy
+
+  # One-shot backup of the bot's data, taken while the bot is stopped ("cold").
+  # It reads ONE line from standard input: the address to upload to (a
+  # presigned PUT URL), so that address is never in the environment, on a
+  # command line or in a file:
+  #
+  #   docker compose stop bot
+  #   docker compose run --rm -T backup < url.txt
+  #   docker compose start bot
+  #
+  # The archive is encrypted to BACKUP_AGE_RECIPIENT (an age PUBLIC key; the
+  # private key never enters the room). `run backup hot` passes "hot" instead
+  # of "cold". Needs /opt/fugal-bot/backup.sh in the bot image; until the
+  # image has it, this service only fails to start.
+  backup:
+    profiles: [backup]
+    image: ${BOT_IMAGE:-fugal-bot-bot:stage0}
+    entrypoint: ["/opt/fugal-bot/backup.sh"]
+    command: ["cold"]
+    stdin_open: true
+    user: "1000:1000"
+    network_mode: host   # the only network with outbound access in a room
+    environment:
+      BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      # Read-only, and never created: a missing data directory must fail the
+      # backup, not produce an empty one.
+      - type: bind
+        source: ${DATA_DIR:?set DATA_DIR}/home
+        target: /home/node
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: "no"
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
