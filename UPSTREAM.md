@@ -34,8 +34,13 @@ Image layers (`bot/Dockerfile`):
   noVNC + websockify, Chromium, fonts, supervisor, xdotool;
 - deleted the bundled `clawhub` skill (`/app/skills/clawhub`), which teaches
   the agent to search for and install third-party skills;
+- added the Debian package `age` (1.2.1) for encrypting backups, and named
+  `curl` (already in the upstream image) so it stays;
 - added our scripts: `entrypoint.sh`, `start-gateway.sh`, `render-config.mjs`,
-  `healthcheck.sh`, `supervisord.conf`, Openbox autostart, noVNC landing page;
+  `seed-workspace.mjs`, `backup.sh`, `restore.sh`, `healthcheck.sh`,
+  `supervisord.conf`, Openbox autostart, noVNC landing page; and the starter
+  workspace files in `seed/` (`IDENTITY.md`, `SOUL.md`, `USER.md`, `AGENTS.md`,
+  `BOOTSTRAP.md`), which are ours, not copies of upstream's templates;
 - environment: `OPENCLAW_NO_AUTO_UPDATE=1`, `DO_NOT_TRACK=1`,
   `OPENCLAW_TELEMETRY_ENDPOINT` and `OPENCLAW_CLAWHUB_URL` pointed at an
   unreachable local address, `OPENCLAW_DISABLE_BONJOUR=1`.
@@ -44,7 +49,24 @@ Configuration written at every start (`bot/render-config.mjs`; full list and
 reasons in `SECURITY-NOTES.md`): all skill and plugin installs blocked, bundled
 skills off, skill self-learning off, update checks and auto-update off,
 telemetry off, gateway auth delegated to our proxy, model endpoint and Telegram
-from the environment.
+from the environment. Optional, from the environment: the agent's name and
+emoji (`agents.entries.<id>.identity`), the accent colour (`ui.seamColor`),
+the model's input kinds, extra request fields
+(`agents.defaults.models["bot/<model>"].params.extra_body`), dreaming off
+(`plugins.entries.memory-core.config.dreaming.enabled`), and a `tools.deny`
+list. All of these are upstream's documented config keys.
+
+Upstream behaviour we rely on and checked on v2026.11.6 (the smoke test
+checks each again, so an upgrade that changes one fails it):
+
+- A workspace that already holds the five files, with a `BOOTSTRAP.md` that
+  differs from upstream's, keeps all of them. The custom `BOOTSTRAP.md` stays
+  "pending" (it is put into the system prompt) until it is deleted, and is
+  not recreated afterwards.
+- `openclaw backup create --verify --json` works while the gateway runs
+  (SQLite stores) and lays files out under `payload/posix/<source path>`.
+- With dreaming disabled, the "Memory Dreaming Promotion" job is not
+  scheduled.
 
 Process layout: supervisord (non-root) runs the desktop and the gateway; the
 gateway is still started through upstream's own `docker-entrypoint.mjs`.
@@ -83,6 +105,8 @@ is reproducible by us, not only pinned.
 | xterm | terminal | Debian trixie package | MIT/X11 |
 | Chromium | the bot's browser | Debian trixie package | BSD-3-Clause and others (see the package) |
 | supervisor | process manager | Debian trixie package | BSD-style (Repoze) |
+| age 1.2.1 | encrypting backups to a public key | Debian trixie package | BSD-3-Clause |
+| curl | uploading and downloading backups | in the OpenClaw image (Debian trixie package) | curl licence (MIT-style) |
 
 The Debian packages are installed with `apt-get` during the build and are not
 yet pinned to a snapshot date (see `SECURITY-NOTES.md`, gaps). Their licence
