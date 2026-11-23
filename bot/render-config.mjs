@@ -271,6 +271,10 @@ const managed = {
   // --- removed / disabled: marketplace, installs, updates, telemetry --------
   skills: {
     allowBundled: [], // no bundled third-party-CLI skills; built-in tools stay
+    // Our own reference skills, read-only in the image (they change with it).
+    // Only each skill's name and one-line description go into every request;
+    // the agent reads a file's section when a question needs it.
+    load: { extraDirs: ["/opt/fugal-bot/skills"] },
     install: { allowUploadedArchives: false },
     workshop: { autonomous: { mode: "off" } },
   },

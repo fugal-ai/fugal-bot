@@ -1,0 +1,72 @@
+# Bittensor glossary
+
+Short definitions; details in PRIMER.md. Checked against runtime v493
+(2026-11-23).
+
+- **Alpha (α)**: a subnet's own token. Each subnet's alpha is a separate asset.
+- **Activity cutoff**: blocks without setting weights after which a validator is left out of consensus (about 5,000 at tempo 360).
+- **Archive node**: a node that keeps old state; needed to read the chain as it was days ago.
+- **Axon**: a miner's published network endpoint (IP and port) on chain.
+- **Basket**: a root validator's fund of subnet alpha earned from root dividends (since runtime 441, "Root Reborn").
+- **Beta (β)**: a share count in one root validator's basket; not a coin.
+- **Block**: one chain step, about 12 s; 7,200 a day.
+- **Bonds**: a validator's moving average of its weights; dividends are paid through bonds.
+- **btcli**: the command-line wallet and chain tool (now developed inside the subtensor repo).
+- **Burn / recycle**: burned tokens are gone but still counted in issuance; recycled tokens leave issuance and can be minted again.
+- **Childkey**: a hotkey that receives a share of a parent validator's stake weight on a subnet (up to 5 per subnet).
+- **Claim (root)**: turning accrued basket yield into root TAO stake; costs a fee.
+- **Coldkey**: the key that owns funds and signs financial actions. Keep offline.
+- **Collateral**: part of a registration price locked as stake, released as the miner earns.
+- **Commit-reveal**: weights are submitted hashed and revealed later, against copying.
+- **Consensus (Yuma)**: per miner, the stake-weighted median of validators' weights.
+- **Conviction lock**: alpha locked on a subnet; a floor on unstaking that accrues "conviction" toward a hotkey; can transfer subnet ownership after a year above 18%.
+- **Deregistration / pruning**: losing a UID when a full subnet takes a new registration (lowest emission goes first); or a whole subnet removed (lowest EMA price) when the subnet limit is reached.
+- **Dividends**: a validator's share of the validators' emission, passed on to its stakers after take.
+- **dTAO / dynamic TAO**: the February 2025 upgrade that gave each subnet its own alpha token and pool.
+- **EMA price / moving price**: slow average of a subnet's price; sets its share of TAO emission.
+- **Emission**: newly minted TAO (0.5 per block now) and alpha.
+- **Emission gate**: the rule that shrinks very small subnets' emission shares.
+- **Emission weights**: a subnet's `[burn, recycle, owner, validators, miners]` split (default 0/0/18/41/41).
+- **Epoch**: the moment a subnet's accumulated alpha is paid out, every tempo.
+- **Etao**: runtime 480/481; owners choose their emission split.
+- **Existential deposit**: 500 rao; below it an account is wiped.
+- **Finney**: Bittensor mainnet.
+- **Gamma (γ)**: dollar-denominated, non-transferable service credit for one subnet, minted by burning its alpha (runtime 487+).
+- **Halving**: TAO emission halves as issuance passes 10.5M, 15.75M...; first in December 2025.
+- **Hotkey**: an operating key; holds UIDs, signs weights.
+- **Hyperparameters**: per-subnet settings (tempo, immunity period, burn limits...).
+- **Immunity period**: blocks during which a new neuron cannot be pruned.
+- **Incentive**: a miner's share (0..1) of the miners' emission.
+- **Kappa**: the stake fraction that defines consensus (about 0.5).
+- **Liquid alpha**: per-pair bond smoothing; only with Yuma3.
+- **Mechanism (mechid)**: one of several scoring systems in a subnet, each with its own weights; UIDs shared.
+- **Metagraph**: the full per-neuron state of a subnet.
+- **Miner**: a neuron that does the subnet's work.
+- **MEV shield**: encrypted submission so large swaps cannot be front-run.
+- **Netuid**: a subnet's number. 0 is root.
+- **Neuron**: a registered hotkey on a subnet (miner or validator).
+- **Nominator / delegator / staker**: someone who stakes to a validator they do not run.
+- **Null consensus**: a subnet mode where only the largest-stake validator's weights count.
+- **Owner cut**: the subnet owner's slot of emission (default 18%).
+- **Pool**: a subnet's TAO and alpha reserves; staking swaps against it.
+- **Price**: TAO per 1 alpha in the pool.
+- **Price impact / slippage**: how much worse than spot a swap fills, because of its own size (impact) or others' trades first (slippage).
+- **Rao**: 10⁻⁹ TAO (or alpha).
+- **Registration cost (burn)**: floating price of a UID; rises 1.26x per registration, halves every 360 quiet blocks (defaults).
+- **Root (netuid 0)**: where TAO is staked as TAO; earns a share of every subnet's emission.
+- **Root proportion / root share**: the part of a subnet's emission paid to root stakers, taken off the top of the validator slot; large for young subnets.
+- **Stake weight**: alpha stake + root TAO stake x TaoWeight (0.18).
+- **Subnet**: an incentive market with its own code, owner, miners, validators and token.
+- **Subnet identity**: owner-published name, GitHub, website, Discord, contact, description, logo. Self-declared.
+- **Subtensor**: the Bittensor chain (and its repo, github.com/RaoFoundation/subtensor).
+- **Take**: the fraction of dividends a validator keeps (default 18%).
+- **TAO (τ)**: the network token; 21M cap.
+- **TaoWeight**: 0.18; how much one root TAO counts relative to one alpha in stake weight.
+- **Tempo**: blocks per epoch (default 360, about 72 min).
+- **UID**: a neuron's slot number on a subnet (default 256 slots).
+- **Validator**: a neuron with a permit that scores miners by setting weights.
+- **Validator permit**: given each epoch to the top K neurons by stake weight (default K = 128).
+- **Validator trust**: the share of a validator's weights that survived consensus clipping.
+- **Weights**: a validator's scores over a subnet's UIDs.
+- **Yuma Consensus / Yuma3**: the chain's rule turning weights into incentive and dividends; Yuma3 is a newer bond variant per subnet.
+- **Trust, rank**: older metrics no longer computed by the chain.

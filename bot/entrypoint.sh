@@ -42,14 +42,25 @@ cat > /tmp/novnc-web/index.html <<HTML
 HTML
 unset vncpw target
 
+# "No config file yet" is how a brand-new data directory is recognised, so
+# this is decided before render-config.mjs writes one.
+new_data=0
+[ -e "${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}" ] || new_data=1
+
 # Optional starter files for the agent's workspace (identity, house rules, the
-# first-conversation script). Must run before render-config.mjs: "no config
-# file yet" is how it knows the data directory is new. Existing files are
-# never overwritten.
+# first-conversation script). Must run before render-config.mjs (same reason).
+# A file is only ever replaced while it is still exactly what an image wrote;
+# edited files are kept (see seed-workspace.mjs).
 if [ "${SEED_WORKSPACE:-}" = "1" ]; then
   node /opt/fugal-bot/seed-workspace.mjs
 fi
 
 node /opt/fugal-bot/render-config.mjs
+
+# A new data directory has nothing for `openclaw doctor --fix` to migrate or
+# repair: mark it as made by this image, so start-gateway.sh skips doctor.
+if [ "$new_data" = 1 ] && [ -s /etc/fugal-bot/image-id ]; then
+  cp /etc/fugal-bot/image-id "$HOME/.openclaw/fugal-doctor.ok"
+fi
 
 exec /usr/bin/supervisord -c /etc/fugal-bot/supervisord.conf

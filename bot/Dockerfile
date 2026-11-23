@@ -65,12 +65,14 @@ RUN pip_whl=/tmp/pip-26.3-py3-none-any.whl \
  && ! "$venv/bin/python3" -I -c 'import pip' 2>/dev/null
 
 COPY --chown=root:root supervisord.conf /etc/fugal-bot/supervisord.conf
-COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs healthcheck.sh start-gateway.sh backup.sh restore.sh /opt/fugal-bot/
+COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs seed-history.json healthcheck.sh start-gateway.sh backup.sh restore.sh /opt/fugal-bot/
 COPY --chown=root:root seed/ /opt/fugal-bot/seed/
+COPY --chown=root:root skills/ /opt/fugal-bot/skills/
 COPY --chown=root:root tools/taoq.py /opt/fugal-bot/tools/taoq.py
 COPY --chown=root:root openbox-autostart /etc/xdg/openbox/autostart
 RUN chmod 0755 /opt/fugal-bot/*.sh /opt/fugal-bot/seed /etc/xdg/openbox/autostart /opt/fugal-bot/tools/taoq.py \
- && chmod 0644 /opt/fugal-bot/*.mjs /opt/fugal-bot/seed/* /etc/fugal-bot/supervisord.conf /opt/fugal-bot/tools/requirements.txt \
+ && chmod 0644 /opt/fugal-bot/*.mjs /opt/fugal-bot/*.json /opt/fugal-bot/seed/* /etc/fugal-bot/supervisord.conf /opt/fugal-bot/tools/requirements.txt \
+ && find /opt/fugal-bot/skills -type d -exec chmod 0755 {} + && find /opt/fugal-bot/skills -type f -exec chmod 0644 {} + \
  && ln -sf /opt/fugal-bot/tools/taoq.py /usr/local/bin/taoq \
  && TAOQ_ENDPOINTS=ws://127.0.0.1:9 taoq --version
 
@@ -138,6 +140,15 @@ ENV HOME=/home/node \
 #   --build-arg GIT_REVISION=$(git rev-parse HEAD) --build-arg BUILD_DATE=$(date -u +%FT%TZ)
 ARG GIT_REVISION=unknown
 ARG BUILD_DATE=unknown
+# What this image is, for start-gateway.sh: `openclaw doctor --fix` runs once
+# per data directory and image, not at every start (see that script). The
+# OpenClaw version, the commit, and a hash of our own start files (a local
+# build has no commit). A tiny layer of its own; the big one above stays.
+RUN { echo "openclaw $(node -p 'require("/app/package.json").version')"; \
+      echo "revision ${GIT_REVISION}"; \
+      echo "files $(cat /opt/fugal-bot/*.sh /opt/fugal-bot/*.mjs /etc/fugal-bot/supervisord.conf | sha256sum | cut -c1-16)"; \
+    } > /etc/fugal-bot/image-id \
+ && chmod 0644 /etc/fugal-bot/image-id && cat /etc/fugal-bot/image-id
 LABEL org.opencontainers.image.title="fugal-bot" \
       org.opencontainers.image.revision="${GIT_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \

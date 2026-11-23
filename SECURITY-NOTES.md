@@ -18,7 +18,7 @@ fetches or runs third-party code or calls home.
 | ClawHub registry access | `OPENCLAW_CLAWHUB_URL=http://127.0.0.1:9/disabled` (unreachable) | `bot/Dockerfile` |
 | Installing skills or plugins (ClawHub, uploads, git or local paths, skill dependency installers, plugin install/update) | `security.installPolicy.enabled: true` for `skill` and `plugin` with **no** policy command, which upstream documents as "installs are blocked" | `bot/render-config.mjs` |
 | Uploaded skill archives | `skills.install.allowUploadedArchives: false` | same |
-| Bundled skills (prompt packs that drive third-party CLIs) | `skills.allowBundled: []` (an empty list disables all bundled skills) | same |
+| Bundled skills (prompt packs that drive third-party CLIs) | `skills.allowBundled: []` (an empty list disables all bundled skills). The one skill that is on is ours: a read-only Bittensor reference in the image (`/opt/fugal-bot/skills`, `skills.load.extraDirs`), plain text, no commands of its own beyond `grep`/`sed` reads of its files | same |
 | Self-written skills from conversations | `skills.workshop.autonomous.mode: "off"` | same |
 | Update checks, auto-update, update-outcome reports | `update.checkOnStart: false`, `update.auto.enabled: false`, `OPENCLAW_NO_AUTO_UPDATE=1` | `render-config.mjs`, `bot/Dockerfile` |
 | Telemetry and install counting | `telemetry.enabled: false`, `DO_NOT_TRACK=1`, `OPENCLAW_TELEMETRY_ENDPOINT` unreachable | same |

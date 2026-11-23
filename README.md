@@ -171,7 +171,14 @@ All optional; leave them unset and the bot behaves as before.
 - `UI_ACCENT_COLOR` (`#rrggbb`): the accent colour of the web chat. A colour
   you pick under Settings, Appearance wins over it.
 - `SEED_WORKSPACE=1`: at start, starter files are written into the agent's
-  workspace where they are missing. A file that exists is never overwritten.
+  workspace where they are missing, and kept current: a file is replaced by
+  a newer image's version only while its content is still exactly what an
+  image wrote (the SHA-256 recorded in `~/.openclaw/fugal-seed.json` when it
+  was written, or any earlier template in `bot/seed-history.json` rendered
+  with this bot's name, emoji and address). A file the user or the agent
+  changed in any way is never touched again. When a template changes, add the
+  version being replaced to `bot/seed-history.json` (`node bot/test_seed.mjs`
+  tests the rules).
   - `IDENTITY.md`, `SOUL.md`, `USER.md`: the name and emoji, two lines on
     tone, and what is known about the user (the public address below).
   - `AGENTS.md`: house rules. Ask before sending a message to anyone else,
@@ -192,6 +199,12 @@ All optional; leave them unset and the bot behaves as before.
     message only when something is new, worse or resolved), writes what it learned to its
     memory files and deletes `BOOTSTRAP.md`, which ends the first run: the
     file is not written again at later starts or after a restore.
+- The Bittensor reference (in the image, `bot/skills/bittensor/`: a primer on
+  how the network works, a glossary, a map of sources) is an OpenClaw skill
+  loaded from `/opt/fugal-bot/skills` (`skills.load.extraDirs`). Only its name
+  and one-line description are in every request; the agent reads one section
+  of a file when a question needs it (`AGENTS.md` says when). It changes with
+  the image, not with the workspace.
 - `taoq` (in the image, on `PATH`): read-only Bittensor reports for those
   jobs (stake, subnet, hotkey, the week, a subnet brief), JSON or `--text`.
   No wallet, no keys; public finney endpoints. Units, checks and the

@@ -46,6 +46,10 @@ jobs:
       - name: Unit tests (gate)
         run: python3 -I gate/test_gate.py
 
+      # Node only, no network: the starter-file rules (new, updated, edited, retired).
+      - name: Unit tests (seed files)
+        run: node bot/test_seed.mjs
+
       # Stdlib only, no network: replays a recorded finney read (bot/tools/fixtures).
       - name: Unit tests (chain tool, taoq)
         run: python3 -I bot/tools/test_taoq.py

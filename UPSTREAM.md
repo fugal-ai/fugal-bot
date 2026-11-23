@@ -41,6 +41,16 @@ Image layers (`bot/Dockerfile`):
   `supervisord.conf`, Openbox autostart, noVNC landing page; and the starter
   workspace files in `seed/` (`IDENTITY.md`, `SOUL.md`, `USER.md`, `AGENTS.md`,
   `BOOTSTRAP.md`), which are ours, not copies of upstream's templates;
+- the gateway is started without upstream's container entrypoint
+  (`/app/docker-entrypoint.mjs`), which runs `openclaw doctor --fix` at every
+  container start: `start-gateway.sh` runs the same doctor command (with the
+  same activation-marker variable) only at the first start of an image on a
+  data directory, recorded in `~/.openclaw/fugal-doctor.ok` against
+  `/etc/fugal-bot/image-id` (OpenClaw version, commit, hash of our start
+  files, written at build). A new data directory is marked at once (nothing
+  to repair). In a sandbox room doctor was 111-160 s of every start;
+- our own reference skill (`/opt/fugal-bot/skills/bittensor`, read-only),
+  enabled with `skills.load.extraDirs`; bundled skills stay off;
 - environment: `OPENCLAW_NO_AUTO_UPDATE=1`, `DO_NOT_TRACK=1`,
   `OPENCLAW_TELEMETRY_ENDPOINT` and `OPENCLAW_CLAWHUB_URL` pointed at an
   unreachable local address, `OPENCLAW_DISABLE_BONJOUR=1`;
