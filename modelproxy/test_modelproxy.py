@@ -33,11 +33,17 @@ LOGS = []
 mp.log = LOGS.append
 
 
+NOT_FINAL = ("asking again", "malformed answer", "passed on")
+
+
 def wait_logs(n):
     """The proxy counts a call after the last byte has gone out; wait for its
-    log line so a test never looks (or moves the clock) too early."""
+    log line so a test never looks (or moves the clock) too early. Lines about
+    a broken answer come before that line and are not counted."""
     deadline = time.monotonic() + 5
-    while len(LOGS) < n and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        if sum(1 for line in list(LOGS) if not any(m in line for m in NOT_FINAL)) >= n:
+            return
         time.sleep(0.002)
 
 
@@ -150,7 +156,7 @@ class Base(unittest.TestCase):
         if body is not None and not isinstance(body, bytes):
             body = json.dumps(body).encode()
             h.setdefault("Content-Type", "application/json")
-        logged = len(LOGS)
+        logged = sum(1 for line in list(LOGS) if not any(m in line for m in NOT_FINAL))
         conn.request(method, path, body=body, headers=h)
         resp = conn.getresponse()
         data = resp.read()
@@ -290,8 +296,8 @@ class Streaming(Base):
         self.assertEqual(sent["messages"][0]["content"], BODY_CANARY)
         self.assertEqual(data, sse(*events))  # exactly the stream a client without the option expects
         self.assertEqual(self.usage()["total"],
-                         {"requests": 1, "prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18,
-                          "cached_prompt_tokens": 0, "usd": 0.0, "estimated_requests": 0})
+                         {**mp._zero(), "requests": 1, "prompt_tokens": 11, "completion_tokens": 7,
+                          "total_tokens": 18})
 
     def test_include_usage_false_is_also_overridden_and_hidden(self):
         events = self.stream_reply()
@@ -1483,6 +1489,430 @@ class RoomProxyBehindGateway(GatewayBase):
         table["tenants"][0]["usd_per_day"] = 1
         self.put(table)
         self.assertEqual(self.chat()[0].status, 200)            # raised centrally: the next call goes through
+
+
+# ---- broken tool calls ---------------------------------------------------------------
+# Recorded answers of DeepSeek-V4-Flash on Chutes (2026-11-23, a real bot's
+# turns, model output only): four with the model's `</｜DSML｜>` markup
+# inside tool-call arguments (the JSON still parses), one whose arguments turn
+# into garbage that is not JSON; and two good ones.
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+BAD = ("bad-dsml-1.sse", "bad-dsml-2.sse", "bad-dsml-3.sse", "bad-dsml-4.sse", "bad-garbage-args.sse")
+
+
+def fixture(name):
+    with open(os.path.join(FIXTURES, name), "rb") as f:
+        return f.read()
+
+
+def fixture_usage(name):
+    for line in reversed(fixture(name).split(b"\n")):
+        if line.startswith(b"data: {") and b'"usage":{' in line:
+            return mp.usage_tokens(json.loads(line[6:]))
+
+
+def check_stream(raw):
+    check = mp.ToolCallCheck()
+    scan = mp.SSEScanner(strip=False, observer=check.payload)
+    scan.feed(raw)
+    scan.finish()
+    return check
+
+
+TOOLS = [{"type": "function", "function": {"name": "exec", "parameters": {"type": "object"}}}]
+GOOD_CALL = [chunk({"role": "assistant", "content": None, "tool_calls": [
+                 {"index": 0, "id": "call_1", "type": "function", "function": {"name": "exec", "arguments": ""}}]}),
+             chunk({"tool_calls": [{"index": 0, "function": {"arguments": '{"command": "taoq subnet 70 --text"}'}}]}),
+             chunk({}, "tool_calls")]
+
+
+def tool_json(arguments, name="exec", finish="tool_calls", usage=USAGE):
+    return json.dumps({"id": "c1", "object": "chat.completion", "model": "m", "usage": usage, "choices": [
+        {"index": 0, "finish_reason": finish, "message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call_1", "type": "function", "function": {"name": name, "arguments": arguments}}]}}]}).encode()
+
+
+class ToolCallChecks(unittest.TestCase):
+    """The check alone, on recorded and made-up answers."""
+
+    def test_recorded_broken_answers_are_found(self):
+        reasons = {name: check_stream(fixture(name)).problem(stream=True) for name in BAD}
+        self.assertEqual(reasons, {"bad-dsml-1.sse": "model markup in a tool call",
+                                   "bad-dsml-2.sse": "model markup in a tool call",
+                                   "bad-dsml-3.sse": "model markup in a tool call",
+                                   "bad-dsml-4.sse": "model markup in a tool call",
+                                   "bad-garbage-args.sse": "tool-call arguments are not valid JSON"})
+
+    def test_recorded_good_answers_pass(self):
+        for name in ("good-tool-call.sse", "good-text.sse"):
+            check = check_stream(fixture(name))
+            self.assertIsNone(check.problem(stream=True), name)
+        self.assertTrue(check_stream(fixture("good-tool-call.sse")).tool_seen)
+        self.assertFalse(check_stream(fixture("good-text.sse")).tool_seen)
+
+    def test_ordinary_symbols_are_not_markup(self):
+        for command in ('ls -l | grep "<b>" > /tmp/x 2>&1 || echo "a|b"', "echo ▁▂▃ progress",
+                        "echo 'A｜B'", "printf '<|im_start|>'", "cat <<'EOF'\n|x|\nEOF"):
+            check = check_stream(sse(*GOOD_CALL[:1], chunk({"tool_calls": [{"index": 0, "function": {
+                "arguments": json.dumps({"command": command})}}]}), chunk({}, "tool_calls")))
+            self.assertIsNone(check.problem(stream=True), command)
+
+    def test_each_kind_of_broken_call(self):
+        def one(*events, done=True):
+            return check_stream(sse(*events, done=done)).problem(stream=True)
+        start = chunk({"tool_calls": [{"index": 0, "id": "c", "function": {"name": "exec", "arguments": ""}}]})
+
+        def args(text):
+            return chunk({"tool_calls": [{"index": 0, "function": {"arguments": text}}]})
+        self.assertEqual(one(start, args('{"command": "ls'), done=False), "tool-call arguments are not valid JSON")
+        self.assertEqual(one(start, args('{"command": "ls"}'), done=False), "the stream ended inside a tool call")
+        self.assertEqual(one(start, args('{"command": "ls"}')), "the stream ended without a finish reason")
+        self.assertEqual(one(start, args('{"command": "ls"}'), chunk({}, "length")),
+                         "a tool call cut off at the length limit")
+        self.assertEqual(one(start, args('["ls"]'), chunk({}, "tool_calls")), "tool-call arguments are not a JSON object")
+        self.assertEqual(one(chunk({"tool_calls": [{"index": 0, "function": {"arguments": "{}"}}]}), chunk({}, "tool_calls")),
+                         "a tool call without a name")
+        # markup escaped inside the arguments' JSON, and markup split across two text chunks
+        self.assertEqual(one(start, args('{"command": "ls\\uff5c>"}'), chunk({}, "tool_calls")),
+                         "model markup in a tool call")
+        self.assertEqual(one(chunk({"content": "ok <"}), chunk({"content": "｜tool▁calls"}), start,
+                             args("{}"), chunk({}, "tool_calls")), "model markup in the text")
+        self.assertIsNone(one(start, args(""), chunk({}, "tool_calls")))       # no arguments at all is fine
+        self.assertEqual(mp.ToolCallCheck().problem(stream=True, interrupted=True), "the answer was cut off")
+
+    def test_whole_json_answers(self):
+        for body, want in ((tool_json('{"command": "ls"}'), None),
+                           (tool_json('{"command": "ls</｜DSML｜>"}'), "model markup in a tool call"),
+                           (tool_json('{"command": "ls" HHHH'), "tool-call arguments are not valid JSON"),
+                           (tool_json('{"command": "l', finish="length"), "tool-call arguments are not valid JSON"),
+                           (completion(), None)):
+            check = mp.ToolCallCheck()
+            check.message(json.loads(body))
+            self.assertEqual(check.problem(stream=False), want)
+
+    def test_which_requests_are_checked(self):
+        self.assertTrue(mp.offers_tools({"tools": TOOLS}))
+        self.assertTrue(mp.offers_tools({"functions": [{"name": "f"}]}))
+        for req in ({}, {"tools": []}, {"tools": None}, None, [1], {"tool_choice": "auto"}):
+            self.assertFalse(mp.offers_tools(req), req)
+
+
+class MalformedRetry(Base):
+    """A broken tool call is asked again while nothing has gone to the client."""
+    PRICES = '{"m": [100, 200, 10]}'
+
+    def setUp(self):
+        super().setUp()
+        self.start({"BUDGET_PRICES": self.PRICES})
+
+    def answers(self, *replies):
+        """The upstream answers the n-th call with replies[n] (bytes = an SSE
+        body, a callable = itself), the last one again after that."""
+        def reply(h, req):
+            r = replies[min(len(Upstream.seen), len(replies)) - 1]
+            if callable(r):
+                return r(h, req)
+            h.start_stream()
+            h.wfile.write(r)
+        Upstream.reply = reply
+
+    def ask(self, stream=True, **extra):
+        body = {"model": "m", "messages": [{"role": "user", "content": BODY_CANARY}], "tools": TOOLS, **extra}
+        if stream:
+            body.update(stream=True, stream_options={"include_usage": True})   # as OpenClaw asks
+        return self.call("POST", "/v1/chat/completions", body)
+
+    def price(self, usage):
+        return mp.cost_usd((100, 200, 10), *usage)
+
+    def test_a_broken_answer_is_replaced_by_the_next_one(self):
+        self.answers(fixture("bad-dsml-2.sse"), fixture("good-tool-call.sse"))
+        resp, data = self.ask()
+        self.assertEqual((resp.status, data), (200, fixture("good-tool-call.sse")))   # byte for byte
+        self.assertEqual(len(Upstream.seen), 2)
+        self.assertEqual(Upstream.seen[0]["body"], Upstream.seen[1]["body"])          # the same request again
+        good, bad = fixture_usage("good-tool-call.sse"), fixture_usage("bad-dsml-2.sse")
+        total = self.usage()["total"]
+        self.assertEqual((total["requests"], total["prompt_tokens"], total["completion_tokens"],
+                          total["cached_prompt_tokens"]), (1, good[0], good[1], good[2]))      # billed once
+        self.assertAlmostEqual(total["usd"], self.price(good), places=8)
+        self.assertEqual((total["malformed_detected"], total["malformed_retried"], total["malformed_forwarded"]),
+                         (1, 1, 0))
+        self.assertEqual((total["discarded_requests"], total["discarded_prompt_tokens"],
+                          total["discarded_completion_tokens"], total["discarded_cached_prompt_tokens"]),
+                         (1, bad[0], bad[1], bad[2]))
+        self.assertAlmostEqual(total["discarded_usd"], self.price(bad), places=8)
+        self.assertEqual(self.usage()["day"]["malformed_retried"], 1)
+        self.assertTrue(any("malformed answer (model markup in a tool call); asking again (1 of 2)" in line
+                            for line in LOGS), LOGS)
+
+    def test_every_recorded_broken_answer_is_retried(self):
+        for name in BAD:
+            Upstream.seen = []
+            self.answers(fixture(name), fixture("good-tool-call.sse"))
+            self.assertEqual(self.ask()[1], fixture("good-tool-call.sse"), name)
+            self.assertEqual(len(Upstream.seen), 2, name)
+        self.assertEqual(self.usage()["total"]["malformed_retried"], len(BAD))
+
+    def test_when_every_attempt_is_broken_the_last_is_passed_on(self):
+        self.answers(fixture("bad-dsml-1.sse"), fixture("bad-dsml-3.sse"), fixture("bad-garbage-args.sse"))
+        resp, data = self.ask()
+        self.assertEqual((resp.status, data), (200, fixture("bad-garbage-args.sse")))
+        self.assertEqual(len(Upstream.seen), 3)                                   # 1 + MODELPROXY_MALFORMED_RETRIES
+        total, last = self.usage()["total"], fixture_usage("bad-garbage-args.sse")
+        self.assertEqual((total["requests"], total["prompt_tokens"]), (1, last[0]))
+        self.assertEqual((total["malformed_detected"], total["malformed_retried"], total["malformed_forwarded"],
+                          total["discarded_requests"]), (3, 2, 1, 2))
+        self.assertEqual(total["discarded_prompt_tokens"],
+                         fixture_usage("bad-dsml-1.sse")[0] + fixture_usage("bad-dsml-3.sse")[0])
+        self.assertTrue(any("passed on" in line for line in LOGS))
+
+    def test_the_number_of_retries_is_a_setting_and_0_switches_the_check_off(self):
+        self.start({"BUDGET_PRICES": self.PRICES, "MODELPROXY_MALFORMED_RETRIES": "1"})
+        self.answers(fixture("bad-dsml-1.sse"))
+        self.assertEqual(self.ask()[1], fixture("bad-dsml-1.sse"))
+        self.assertEqual(len(Upstream.seen), 2)
+        self.start({"BUDGET_PRICES": self.PRICES, "MODELPROXY_MALFORMED_RETRIES": "0"})
+        Upstream.seen = []
+        self.assertEqual(self.ask()[1], fixture("bad-dsml-1.sse"))
+        self.assertEqual(len(Upstream.seen), 1)
+        with self.assertRaises(mp.ConfigError):
+            mp.Config({"MODEL_BASE_URL": "http://x", "MODELPROXY_MALFORMED_RETRIES": "-1"})
+
+    def test_a_stream_cut_off_inside_a_tool_call_is_asked_again(self):
+        def cut(h, req):
+            h.start_stream()
+            h.wfile.write(sse(*GOOD_CALL[:2], done=False))   # then the connection closes: no finish, no [DONE]
+        self.answers(cut, sse(*GOOD_CALL, USAGE_CHUNK))
+        self.assertEqual(self.ask()[1], sse(*GOOD_CALL, USAGE_CHUNK))
+        self.assertEqual(len(Upstream.seen), 2)
+        total = self.usage()["total"]
+        self.assertEqual((total["malformed_retried"], total["discarded_requests"]), (1, 1))
+
+    def test_length_cut_inside_a_tool_call_is_asked_again(self):
+        self.answers(sse(*GOOD_CALL[:2], chunk({}, "length"), USAGE_CHUNK), sse(*GOOD_CALL, USAGE_CHUNK))
+        self.assertEqual(self.ask()[1], sse(*GOOD_CALL, USAGE_CHUNK))
+        self.assertEqual(len(Upstream.seen), 2)
+
+    def test_proxy_added_usage_option_is_still_hidden_after_a_retry(self):
+        self.answers(fixture("bad-dsml-4.sse"), fixture("good-tool-call.sse"))
+        resp, data = self.call("POST", "/v1/chat/completions", {"model": "m", "stream": True, "tools": TOOLS,
+                                                                  "messages": []})
+        self.assertNotIn(b'"choices":[],"usage"', data)
+        self.assertTrue(data.endswith(b"data: [DONE]\n\n"))
+        self.assertEqual(self.usage()["total"]["prompt_tokens"], fixture_usage("good-tool-call.sse")[0])
+
+    def test_a_good_text_answer_passes_unchanged_and_costs_no_retry(self):
+        self.answers(fixture("good-text.sse"))
+        self.assertEqual(self.ask()[1], fixture("good-text.sse"))
+        total = self.usage()["total"]
+        self.assertEqual((len(Upstream.seen), total["malformed_detected"], total["discarded_requests"]), (1, 0, 0))
+
+    def test_long_text_streams_before_the_upstream_finishes_and_is_then_never_retried(self):
+        go, state = threading.Event(), {}
+        long_text = "word " * 130                                    # 650 characters: past the hold limit
+
+        def reply(h, req):
+            h.start_stream()
+            h.wfile.write(sse(chunk({"role": "assistant", "content": long_text}), done=False))
+            h.wfile.flush()
+            state["released_by_client"] = go.wait(5)
+            # then a broken tool call: too late to ask again, it is passed on and counted
+            h.wfile.write(sse(GOOD_CALL[0], chunk({"tool_calls": [{"index": 0, "function": {
+                "arguments": '{"command": "ls</｜DSML｜>"}'}}]}), chunk({}, "tool_calls"), USAGE_CHUNK))
+        Upstream.reply = reply
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("POST", "/v1/chat/completions", body=json.dumps(
+            {"model": "m", "stream": True, "tools": TOOLS, "messages": []}).encode())
+        resp = conn.getresponse()
+        self.assertIn(b"word word", resp.readline())
+        self.assertFalse(go.is_set())
+        go.set()
+        rest = resp.read()
+        conn.close()
+        wait_logs(2)
+        self.assertIn(b"DSML", rest)
+        self.assertTrue(state["released_by_client"], "the proxy held long text back")
+        self.assertEqual(len(Upstream.seen), 1)
+        total = self.usage()["total"]
+        self.assertEqual((total["malformed_detected"], total["malformed_retried"], total["malformed_forwarded"]),
+                         (1, 0, 1))
+        self.assertTrue(any("passed on (it had started to stream)" in line for line in LOGS))
+
+    def test_short_text_is_held_until_the_answer_ends(self):
+        go, state = threading.Event(), {}
+
+        def reply(h, req):
+            h.start_stream()
+            h.wfile.write(sse(chunk({"content": "I'll check."}), done=False))
+            h.wfile.flush()
+            state["waited"] = go.wait(0.5)
+            h.wfile.write(sse(*GOOD_CALL, USAGE_CHUNK))
+        Upstream.reply = reply
+        t0 = time.monotonic()
+        _, data = self.ask()
+        self.assertFalse(state["waited"])           # nothing reached the client while the upstream paused
+        self.assertGreaterEqual(time.monotonic() - t0, 0.45)
+        self.assertEqual(data, sse(chunk({"content": "I'll check."}), *GOOD_CALL, USAGE_CHUNK))
+
+    def test_requests_without_tools_are_not_checked_or_held(self):
+        self.answers(fixture("bad-dsml-1.sse"))
+        _, data = self.call("POST", "/v1/chat/completions", {"model": "m", "stream": True, "messages": [],
+                                                               "stream_options": {"include_usage": True}})
+        self.assertEqual(data, fixture("bad-dsml-1.sse"))
+        self.assertEqual((len(Upstream.seen), self.usage()["total"]["malformed_detected"]), (1, 0))
+
+    def test_whole_json_answers_are_checked_too(self):
+        bad = tool_json('{"command": "ls" HHHH', usage={"prompt_tokens": 1000, "completion_tokens": 50})
+        good = tool_json('{"command": "ls"}')
+        self.answers(lambda h, req: h.send_bytes(200, bad), lambda h, req: h.send_bytes(200, good))
+        resp, data = self.ask(stream=False)
+        self.assertEqual((resp.status, data, resp.getheader("Content-Length")), (200, good, str(len(good))))
+        total = self.usage()["total"]
+        self.assertEqual((total["prompt_tokens"], total["discarded_prompt_tokens"], total["malformed_retried"]),
+                         (11, 1000, 1))
+
+    def test_if_asking_again_fails_the_broken_answer_is_passed_on(self):
+        self.answers(fixture("bad-dsml-2.sse"), lambda h, req: h.send_bytes(500, b'{"error":{"message":"x"}}'))
+        resp, data = self.ask()
+        self.assertEqual((resp.status, data), (200, fixture("bad-dsml-2.sse")))
+        self.assertEqual(len(Upstream.seen), 2)
+        total = self.usage()["total"]
+        self.assertEqual((total["requests"], total["prompt_tokens"], total["discarded_requests"],
+                          total["malformed_forwarded"]), (1, fixture_usage("bad-dsml-2.sse")[0], 0, 1))
+
+    def test_a_busy_upstream_inside_a_retry_is_waited_for(self):
+        self.start({"BUDGET_PRICES": self.PRICES, "MODELPROXY_UPSTREAM_RETRIES": "2"})
+        self.answers(fixture("bad-dsml-2.sse"), lambda h, req: h.send_bytes(429, b"{}", extra=[("Retry-After", "1")]),
+                     fixture("good-tool-call.sse"))
+        self.assertEqual(self.ask()[1], fixture("good-tool-call.sse"))
+        self.assertEqual((len(Upstream.seen), self.slept), (3, [1.0]))
+
+    def slow(self, raw, pause):
+        def reply(h, req):
+            h.start_stream()
+            h.wfile.write(raw[:200])
+            h.wfile.flush()
+            time.sleep(pause)
+            h.wfile.write(raw[200:])
+        return reply
+
+    def test_a_held_stream_sends_keepalive_comments_and_still_asks_again(self):
+        self.cfg.keepalive_seconds = 0.1
+        self.answers(self.slow(fixture("bad-dsml-2.sse"), 0.6), fixture("good-tool-call.sse"))
+        resp, data = self.ask()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.getheader("Transfer-Encoding"), "chunked")
+        comments = data.count(b": keepalive\n\n")
+        self.assertGreaterEqual(comments, 2)
+        self.assertEqual(data.replace(b": keepalive\n\n", b""), fixture("good-tool-call.sse"))
+        self.assertTrue(data.startswith(b": keepalive"))      # nothing of the broken answer went out
+        self.assertEqual(len(Upstream.seen), 2)
+
+    def test_after_a_keepalive_a_failed_retry_still_gives_the_broken_answer(self):
+        self.cfg.keepalive_seconds = 0.1
+        self.answers(self.slow(fixture("bad-dsml-2.sse"), 0.4), lambda h, req: h.send_bytes(503, b"{}"))
+        resp, data = self.ask()
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b": keepalive", data)
+        self.assertEqual(data.replace(b": keepalive\n\n", b""), fixture("bad-dsml-2.sse"))
+
+    def test_no_keepalive_inside_a_stream_that_passes_through(self):
+        self.cfg.keepalive_seconds = 0.1
+        self.start({"BUDGET_PRICES": self.PRICES, "MODELPROXY_MALFORMED_RETRIES": "1"})
+        self.cfg.keepalive_seconds = 0.1
+        self.answers(fixture("bad-dsml-2.sse"), self.slow(fixture("good-tool-call.sse"), 0.5))
+        _, data = self.ask()
+        while data.startswith(b": keepalive\n\n"):              # (one may come while the first attempt is held)
+            data = data[len(b": keepalive\n\n"):]
+        self.assertEqual(data, fixture("good-tool-call.sse"))   # the last attempt streams: no comment inside it
+
+    def test_counters_survive_a_restart_and_old_files_load(self):
+        self.answers(fixture("bad-dsml-2.sse"), fixture("good-tool-call.sse"))
+        self.ask()
+        self.start({"BUDGET_PRICES": self.PRICES})
+        self.assertEqual(self.usage()["total"]["malformed_retried"], 1)
+        path = os.path.join(self.tmp.name, "usage.json")
+        with open(path, "w", encoding="utf-8") as f:      # a file from before these counters
+            json.dump({"version": 1, "total": {"requests": 2, "prompt_tokens": 5}, "days": {}}, f)
+        self.start({"BUDGET_PRICES": self.PRICES})
+        total = self.usage()["total"]
+        self.assertEqual((total["requests"], total["malformed_detected"], total["discarded_usd"]), (2, 0, 0.0))
+
+    def test_room_caps_count_only_the_answer_passed_on(self):
+        good = fixture_usage("good-tool-call.sse")
+        self.start({"BUDGET_PRICES": self.PRICES, "BUDGET_TOKENS_PER_DAY": str(good[0] + good[1] + 1)})
+        self.answers(fixture("bad-dsml-2.sse"), fixture("good-tool-call.sse"))
+        self.ask()
+        self.assertIsNone(self.usage()["exceeded"])
+
+
+class GatewayMalformed(GatewayBase):
+    PRICES = {"m": [100, 200, 10], "big": [1000, 2000]}
+
+    def answers(self, *replies):
+        MalformedRetry.answers(self, *replies)
+
+    def ask_tools(self, who=None):
+        return self.ask(who, stream=True, tools=TOOLS, stream_options={"include_usage": True})
+
+    def test_the_tenant_pays_for_the_answer_it_gets_and_the_platform_counts_the_rest(self):
+        table = self.table()
+        table["tenants"][0]["usd_per_day"] = 1
+        self.put(table)
+        self.answers(fixture("bad-dsml-3.sse"), fixture("good-tool-call.sse"))
+        resp, data = self.ask_tools()
+        self.assertEqual((resp.status, data), (200, fixture("good-tool-call.sse")))
+        self.assertEqual(resp.getheader(mp.CHECKED_HEADER), "checked")
+        good, bad = fixture_usage("good-tool-call.sse"), fixture_usage("bad-dsml-3.sse")
+        usd_good, usd_bad = mp.cost_usd((100, 200, 10), *good), mp.cost_usd((100, 200, 10), *bad)
+        rep = self.report()
+        alice, platform = rep["tenants"][self.ALICE]["day"], rep["platform"]["day"]
+        self.assertEqual((alice["requests"], alice["prompt_tokens"]), (1, good[0]))
+        self.assertAlmostEqual(alice["usd"], usd_good, places=8)                 # never the thrown-away attempt
+        self.assertAlmostEqual(rep["tenants"][self.ALICE]["remaining_usd"], 1 - usd_good, places=6)
+        for row in (alice, platform):
+            self.assertEqual((row["malformed_detected"], row["malformed_retried"], row["malformed_forwarded"],
+                              row["discarded_prompt_tokens"]), (1, 1, 0, bad[0]))
+            self.assertAlmostEqual(row["discarded_usd"], usd_bad, places=8)
+        self.assertAlmostEqual(platform["usd"], usd_good, places=8)
+        self.assertAlmostEqual(rep["platform"]["remaining_usd"], 100 - usd_good - usd_bad, places=6)
+        self.assertEqual(rep["platform"]["days"][rep["today"]]["malformed_retried"], 1)
+
+    def test_thrown_away_attempts_count_against_the_platform_cap(self):
+        bad = fixture_usage("bad-dsml-3.sse")
+        usd_bad = mp.cost_usd((100, 200, 10), *bad)
+        good = mp.cost_usd((100, 200, 10), *fixture_usage("good-tool-call.sse"))
+        self.put(self.table(platform_usd_per_day=good + usd_bad / 2,
+                            tenants=[{**self.table()["tenants"][1], "usd_per_day": 100}]))
+        self.answers(fixture("bad-dsml-3.sse"), fixture("good-tool-call.sse"))
+        self.assertEqual(self.ask_tools(self.BOB)[0].status, 200)
+        self.assertTrue(self.report()["platform"]["exceeded"])
+        self.assertEqual(self.code(self.ask(self.BOB)), (400, "allowance_exhausted"))
+
+    def test_counters_survive_a_restart(self):
+        self.answers(fixture("bad-dsml-3.sse"), fixture("good-tool-call.sse"))
+        self.ask_tools()
+        self.start({})
+        self.assertEqual(self.report()["tenants"][self.ALICE]["day"]["malformed_retried"], 1)
+
+
+class RoomBehindGatewayMalformed(RoomProxyBehindGateway):
+    PRICES = {"m": [100, 200, 10], "big": [1000, 2000]}
+
+    def test_only_the_gateway_asks_again(self):
+        table = self.table()
+        table["tenants"][0]["usd_per_day"] = 1
+        self.put(table)
+        MalformedRetry.answers(self, fixture("bad-dsml-1.sse"))      # every attempt broken
+        resp, data = self.call("POST", "/v1/chat/completions", {
+            "model": "m", "stream": True, "stream_options": {"include_usage": True}, "tools": TOOLS, "messages": []})
+        wait_logs(2)                                                 # the room's line and the gateway's
+        self.assertEqual((resp.status, data), (200, fixture("bad-dsml-1.sse")))
+        self.assertIsNone(resp.getheader(mp.CHECKED_HEADER))       # the mark stays between the two proxies
+        self.assertEqual(len(Upstream.seen), 3)                      # not 3 x 3
+        self.assertEqual(self.usage()["total"]["malformed_detected"], 0)    # the room proxy did not check again
+        self.assertEqual(self.report()["tenants"][self.ALICE]["day"]["malformed_forwarded"], 1)
 
 
 if __name__ == "__main__":

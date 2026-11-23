@@ -156,7 +156,13 @@ inside a tool call, its arguments are not valid JSON, and OpenClaw
 (v2026.11.6) records "Provider returned an incomplete or malformed tool call".
 It continues the turn once after the first such answer and ends it at the
 second; the number is fixed in OpenClaw, not a setting. The HTTP status stays
-200, so neither model proxy counts it as an error. Short turns are the
+200. Recorded cases also carry the model's own template markup
+(`</｜DSML｜>`) inside otherwise valid JSON arguments. Both model proxies
+now check every answer to a request that offers tools and, if its tool call
+is broken, send the same request again before anything reaches the agent (at
+most twice; counted in `/usage` and `/admin/usage` as `malformed_*`, the
+thrown-away attempts as `discarded_*`, never billed to the bot): see
+"Broken tool calls" in docs/MODELPROXY.md. Short turns remain the other
 defence: AGENTS.md sends chain questions to `taoq` (also when the user names
 a site such as taostats.io, which shows automated browsers a bot check), and
 tells the agent to stop after a few fruitless steps and say what went wrong.

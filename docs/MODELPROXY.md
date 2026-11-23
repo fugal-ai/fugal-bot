@@ -92,6 +92,87 @@ use and the answer is passed through as it is). `MODELPROXY_RETRY_MAX_WAIT`
 (default 30 seconds) bounds the waiting in total: a wait that would pass it
 is not started. A reply that has begun is never repeated.
 
+## Broken tool calls: asked again before the agent sees them
+
+Seen with DeepSeek-V4-Flash on Chutes (2026-11-23): now and then an answer
+that calls a tool is broken while the HTTP status is 200. The recorded cases
+(`modelproxy/fixtures/`, model output only) are the model's own chat-template
+markup inside the tool-call arguments (`</｜DSML｜>`, with U+FF5C, which still
+parses as JSON) and arguments that turn into garbage that is not JSON.
+OpenClaw (v2026.11.6) continues a turn once after such an answer and ends it
+at the second ("couldn't finish this reply"). Both proxies therefore check
+the answer to every chat completion request that offers tools (`tools` or
+`functions`, non-empty) before it reaches the client, and send the same
+request again if it is broken.
+
+**Broken** means any of: a tool call whose arguments are not a JSON object
+(empty arguments are fine); a tool call without a name; the model's
+special-token markup (`｜DSML｜`, `<｜`, `</｜`, `｜>`, `tool▁call`,
+`end▁of▁sentence`) in a tool call's name or arguments (also after JSON
+unescaping) or in the text of the answer; finish reason `length` with a tool
+call; a stream that carries a tool call and ends without `data: [DONE]` or
+without a finish reason; a stream that breaks off while held. Ordinary `<`,
+`|`, `>` and a lone `｜` in a command are not markup.
+
+**Held back, not delayed more than needed.**
+
+- A non-streamed answer is read whole (it is anyway), checked, then sent.
+- A stream is held from its first byte. As soon as it carries a tool call
+  it is held to its end and checked as a whole. Text (and reasoning) is
+  held only up to `MODELPROXY_TOOLCALL_HOLD_CHARS` characters (default
+  600): past that, with no tool call yet, everything held is released and
+  the rest streams as before, unchecked for asking again (a broken tool call
+  that follows is still counted and logged). In the 36 recorded tool-call
+  answers the text before the tool call was at most 600 characters in 33
+  (the others 884, 1,320, 1,561); the 7 final answers ran 8-1,159 characters. So a final answer starts to show after
+  its first ~600 characters (about 150 tokens, 1-2 s on that provider), a
+  shorter one when it is complete, and a tool call when its arguments are
+  complete (OpenClaw runs a tool only then anyway).
+- While a stream is held, the client gets an SSE comment line `: keepalive`
+  after every 15 s without output. OpenClaw ends a model request when no
+  chunk or comment keepalive arrives within its idle window (about 120 s for
+  a cloud provider); several held attempts in a row could come near that.
+  The first comment sends the status line and headers of the attempt being
+  held (a 200 stream); whichever answer is finally passed on goes out under
+  it. A comment is not part of any answer, so asking again after one is
+  still safe, and comments are never put inside a stream that is passing
+  through.
+- Nothing is asked again once a byte of an answer has gone to the client.
+
+**Bounded.** `MODELPROXY_MALFORMED_RETRIES` (default 2, in both modes; 0
+switches the check off and nothing is held) is how often a request is sent
+again; the last attempt is not held at all. If every attempt is broken, the
+last one is passed on as it is, and OpenClaw handles it as before. If asking
+again fails (the upstream cannot be reached or answers an error), the broken
+answer held from before is passed on rather than an error. A busy upstream
+(429 / 503) is waited for inside each attempt as described above.
+
+**Only once through a gateway.** A gateway marks the answers it checked with
+the response header `X-Modelproxy-Toolcalls: checked`; a room proxy behind it
+does not hold or check those again (so at most 3 upstream calls, not 3 x 3),
+and does not pass the header on to the agent.
+
+**Billing and counters.** The answer passed on is billed as any other call
+(the tenant's allowance, the platform's day, a room's caps). An attempt that
+was thrown away is never billed to the tenant or a room's caps; it is counted
+apart in every counter row (room `GET /usage` per day and total; gateway
+`GET /admin/usage` per tenant and platform, today and per day), persisted in
+the same files:
+
+| Counter | Meaning |
+|---|---|
+| `malformed_detected` | broken answers seen (every attempt) |
+| `malformed_retried` | requests sent again because of a broken answer |
+| `malformed_forwarded` | broken answers passed on all the same (every attempt broken, asking again failed, or found after the answer had started to stream) |
+| `discarded_requests`, `discarded_prompt_tokens`, `discarded_cached_prompt_tokens`, `discarded_completion_tokens`, `discarded_usd` | the attempts thrown away, priced like a call |
+
+In a gateway, `discarded_usd` does count against the platform's daily cap
+(`platform_usd_per_day`; the shared upstream account pays for these calls),
+and the platform's `remaining_usd` and `exceeded` include it; the platform's
+`usd` stays the sum of what tenants were billed. Each broken attempt is
+logged in one line with the reason only (`malformed answer (model markup in
+a tool call); asking again (1 of 2)`), never a body.
+
 ## Gateway mode
 
 ```
@@ -154,7 +235,8 @@ carries the token as `Authorization: Bearer fbk_...`.
   `day`, `remaining_usd`, `exceeded`, `in_flight`, `days`) and
   `rejected_since_start`. A counter row is `requests`, `prompt_tokens`,
   `cached_prompt_tokens`, `completion_tokens`, `total_tokens`, `usd`,
-  `estimated_requests`.
+  `estimated_requests`, and the broken-answer counters (`malformed_*`,
+  `discarded_*`, see above).
 
 **What a tenant gets:**
 

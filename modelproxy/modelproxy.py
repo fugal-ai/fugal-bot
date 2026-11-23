@@ -51,6 +51,21 @@ Upstream 429 / 503: retried here, waiting as the upstream's Retry-After says,
 as long as nothing has been sent to the client (MODELPROXY_UPSTREAM_RETRIES,
 MODELPROXY_RETRY_MAX_WAIT; on by default in gateway mode only).
 
+Malformed tool calls (both roles): a chat completion request that offers tools
+gets its answer checked before it reaches the client (see ToolCallCheck). An
+answer whose tool call is broken (arguments that are not a JSON object, no tool
+name, the model's own special-token markup, a stream cut off inside a tool
+call) is thrown away and the same request is sent again, at most
+MODELPROXY_MALFORMED_RETRIES times (default 2; 0 = off); if every attempt is
+broken the last one is passed on as it is. To be able to do that, a stream is
+held back until it carries a tool call (then to its end) or more than
+MODELPROXY_TOOLCALL_HOLD_CHARS characters of text (default 600; then it is
+released and streams on with no further check). Nothing is retried once a
+byte of the answer has gone to the client. Only the answer passed on is
+billed; thrown-away attempts are counted apart (malformed_* and discarded_*
+counters). A gateway marks the answers it checked (CHECKED_HEADER) so that a
+room proxy behind it does not hold them back a second time.
+
 Never logged or stored: request bodies, response bodies, headers, the
 upstream key, tenant tokens.
 """
@@ -73,13 +88,14 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+CHECKED_HEADER = "X-Modelproxy-Toolcalls"   # "checked": a gateway already checked this answer
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection",
               "te", "trailer", "trailers", "transfer-encoding", "upgrade"}
 # Not forwarded upstream: hop-by-hop headers, and every credential a client
 # may send (the agent only has a placeholder; the real key is added here).
 DROP_REQUEST = HOP_BY_HOP | {"host", "content-length", "authorization", "accept-encoding", "expect",
                              "cookie", "x-api-key", "api-key"}
-DROP_RESPONSE = HOP_BY_HOP | {"content-length"}
+DROP_RESPONSE = HOP_BY_HOP | {"content-length", CHECKED_HEADER.lower()}
 # Gateway mode passes on only these: a tenant's other headers (its address as
 # added by a reverse proxy, cookies, ...) are not the upstream's business, and
 # the shared upstream account's headers (organisation, rate-limit state,
@@ -96,6 +112,7 @@ PATH_OK = re.compile(r"[A-Za-z0-9._:@+-]+(/[A-Za-z0-9._:@+-]+)*\Z")
 QUERY_OK = re.compile(r"[A-Za-z0-9._~=&%+:,@/-]*\Z")
 KEEP_JSON_BYTES = 8 * 1024 * 1024   # non-streamed replies are read for `usage` up to this size
 MAX_EVENT_BYTES = 1024 * 1024       # a held-back partial SSE event is released past this size
+MAX_HOLD_BYTES = 8 * 1024 * 1024    # an answer held back for the tool-call check is released past this size
 KEEP_DAYS = 400
 KEEP_GATEWAY_DAYS = 35              # gateway: one usage file per UTC day
 MAX_ADMIN_BODY = 8 * 1024 * 1024
@@ -204,6 +221,12 @@ class Config:
         self.retry_max_wait = _number(env, "MODELPROXY_RETRY_MAX_WAIT", float) or 30.0
         self.retry_backoff = 1.0      # first wait when the upstream names none; doubles each time
         self.sleep = time.sleep
+        # Broken tool calls in answers to requests that offer tools: how often
+        # to ask again (0 = no check, nothing held back), and how much text a
+        # stream may carry before it is released unchecked.
+        self.malformed_retries = _count(env, "MODELPROXY_MALFORMED_RETRIES", 2)
+        self.hold_chars = _count(env, "MODELPROXY_TOOLCALL_HOLD_CHARS", 600)
+        self.keepalive_seconds = 15.0  # an SSE comment to the client while a stream is held back
 
         # Gateway mode only. The admin listener is for the private network
         # between the gateway and its controller; never publish it.
@@ -317,8 +340,32 @@ def utc_day(ts):
 
 
 def _zero():
+    """One row of counters. `requests` .. `estimated_requests` are the answers
+    passed on to the client (what is billed). The rest are about broken tool
+    calls (see ToolCallCheck): `malformed_detected` broken answers seen,
+    `malformed_retried` requests sent again because of one, `malformed_forwarded`
+    broken answers passed on all the same (every attempt broken, or found after
+    the answer had started to stream), and `discarded_*` the tokens and USD of
+    the attempts thrown away (never part of `usd`)."""
     return {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-            "cached_prompt_tokens": 0, "usd": 0.0, "estimated_requests": 0}
+            "cached_prompt_tokens": 0, "usd": 0.0, "estimated_requests": 0,
+            "malformed_detected": 0, "malformed_retried": 0, "malformed_forwarded": 0,
+            "discarded_requests": 0, "discarded_prompt_tokens": 0, "discarded_cached_prompt_tokens": 0,
+            "discarded_completion_tokens": 0, "discarded_usd": 0.0}
+
+
+def add_malformed(row, detected, retried, forwarded, discarded):
+    """Adds the broken-answer counters of one client request to a row.
+    `discarded` is [(prompt, completion, cached, usd)] of the attempts thrown away."""
+    row["malformed_detected"] += detected
+    row["malformed_retried"] += retried
+    row["malformed_forwarded"] += forwarded
+    for prompt, completion, cached, usd in discarded:
+        row["discarded_requests"] += 1
+        row["discarded_prompt_tokens"] += prompt
+        row["discarded_cached_prompt_tokens"] += min(cached, prompt)
+        row["discarded_completion_tokens"] += completion
+        row["discarded_usd"] = round(row["discarded_usd"] + usd, 8)
 
 
 class Meter:
@@ -416,6 +463,19 @@ class Meter:
             except OSError as e:
                 log(f"could not write the usage file ({type(e).__name__}); counting in memory")
 
+    def record_malformed(self, model, detected, retried, forwarded, discarded):
+        """Broken answers of one request; `discarded` is [(prompt, completion, cached)]
+        of the attempts thrown away. Counted apart: never part of `usd` or a cap."""
+        price = self.cfg.price(model)
+        rows = [(p, c, k, cost_usd(price, p, c, k)) for p, c, k in discarded]
+        with self.lock:
+            for row in (self.total, self.days.setdefault(self.today(), _zero())):
+                add_malformed(row, detected, retried, forwarded, rows)
+            try:
+                self._save()
+            except OSError as e:
+                log(f"could not write the usage file ({type(e).__name__}); counting in memory")
+
     def snapshot(self):
         with self.lock:
             c, today = self.cfg, self.today()
@@ -438,6 +498,12 @@ class Meter:
                 "priced": bool(c.prices),
                 "rejected_since_start": dict(self.rejected),
             }
+
+
+def platform_spent(row):
+    """What the platform's daily cap is measured against: the billed answers plus
+    the attempts thrown away for a broken tool call (the upstream bills both)."""
+    return row["usd"] + row.get("discarded_usd", 0.0)
 
 
 class StateError(Exception):
@@ -613,7 +679,7 @@ class Gateway:
         day = self.days.get(self.today())
         if not day:
             return 0.0, 0.0
-        return day["tenants"].get(tid, _zero())["usd"], day["platform"]["usd"]
+        return day["tenants"].get(tid, _zero())["usd"], platform_spent(day["platform"])
 
     def admit(self, tid, tenant):
         """Called before a request goes upstream; see Meter.admit for the result.
@@ -665,6 +731,23 @@ class Gateway:
             except OSError as e:
                 log(f"could not write the usage file ({type(e).__name__}); counting in memory")
 
+    def record_malformed(self, tid, model, detected, retried, forwarded, discarded):
+        """Broken answers of one request (see Meter.record_malformed). The
+        thrown-away attempts never count against the tenant's allowance; their
+        USD does count against the platform's daily cap (the shared upstream
+        account pays for them)."""
+        with self.lock:
+            price = price_of(self.state["prices"], model)
+            rows = [(p, c, k, cost_usd(price, p, c, k)) for p, c, k in discarded]
+            today = self.today()
+            day = self.days.setdefault(today, {"platform": _zero(), "tenants": {}})
+            for row in (day["platform"], day["tenants"].setdefault(tid, _zero())):
+                add_malformed(row, detected, retried, forwarded, rows)
+            try:
+                self._save_day(today)
+            except OSError as e:
+                log(f"could not write the usage file ({type(e).__name__}); counting in memory")
+
     def usage(self, ndays=7):
         """What GET /admin/usage returns: today and the last `ndays` days with
         any use, for the platform and per tenant (tenants removed from the
@@ -693,8 +776,8 @@ class Gateway:
                     "days": {d: dict(self.days[d]["tenants"][tid]) for d in recent if tid in self.days[d]["tenants"]}}
             return {"today": today,
                     "platform": {"usd_per_day": cap, "day": dict(now["platform"]),
-                                 "remaining_usd": left(cap, now["platform"]["usd"]),
-                                 "exceeded": cap is not None and now["platform"]["usd"] >= cap,
+                                 "remaining_usd": left(cap, platform_spent(now["platform"])),
+                                 "exceeded": cap is not None and platform_spent(now["platform"]) >= cap,
                                  "days": {d: dict(self.days[d]["platform"]) for d in recent}},
                     "tenants": tenants,
                     "rejected_since_start": dict(self.rejected)}
@@ -765,6 +848,116 @@ def retry_after(resp):
         return None
 
 
+# The special-token markup of DeepSeek-style chat templates (FULLWIDTH VERTICAL
+# LINE U+FF5C inside angle brackets, LOWER ONE EIGHTH BLOCK U+2581 between
+# words), which a broken answer leaks into tool-call arguments, e.g.
+# `</\uff5cDSML\uff5c>` or `<\uff5ctool\u2581call\u2581begin\uff5c>`. Plain `<`, `|` and
+# `>` in a command never match.
+MARKUP = re.compile("\uff5cDSML\uff5c|<\uff5c|</\uff5c|\uff5c>|tool\u2581call|end\u2581of\u2581sentence")
+TEXT_KEYS = ("content", "reasoning_content", "reasoning")
+
+
+def offers_tools(req):
+    """True for a chat completion request that offers the model tools."""
+    return isinstance(req, dict) and any(isinstance(req.get(k), list) and req[k] for k in ("tools", "functions"))
+
+
+class ToolCallCheck:
+    """Watches one chat completion answer (stream events, or a whole JSON reply)
+    to a request that offered tools, and says what, if anything, makes its
+    tool calls unusable (problem()). Text is only counted, and searched for
+    the model's markup."""
+
+    def __init__(self):
+        self.calls = {}       # (choice, index) -> [name, arguments] as streamed
+        self.finish = {}      # choice -> finish_reason
+        self.text = 0         # characters of text and reasoning so far
+        self.tail = {}        # choice -> the last few text characters (markup split across chunks)
+        self.markup = False   # markup in the text
+        self.done = False     # `data: [DONE]` seen
+
+    @property
+    def tool_seen(self):
+        return bool(self.calls)
+
+    def payload(self, raw):
+        """One SSE `data:` payload (bytes)."""
+        if raw == b"[DONE]":
+            self.done = True
+            return
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            return
+        for ch in (obj.get("choices") if isinstance(obj, dict) else None) or []:
+            if isinstance(ch, dict):
+                self._choice(ch, ch.get("delta"))
+
+    def message(self, obj):
+        """A whole (non-streamed) chat completion."""
+        for ch in (obj.get("choices") if isinstance(obj, dict) else None) or []:
+            if isinstance(ch, dict):
+                self._choice(ch, ch.get("message"))
+
+    def _choice(self, ch, part):
+        i = ch.get("index", 0)
+        if ch.get("finish_reason"):
+            self.finish[i] = ch["finish_reason"]
+        if not isinstance(part, dict):
+            return
+        for key in TEXT_KEYS:
+            v = part.get(key)
+            if isinstance(v, str) and v:
+                self.text += len(v)
+                seen = self.tail.get(i, "") + v
+                if MARKUP.search(seen):
+                    self.markup = True
+                self.tail[i] = seen[-24:]
+        calls = part.get("tool_calls")
+        if isinstance(part.get("function_call"), dict):     # the legacy single call
+            calls = [{"index": 0, "function": part["function_call"]}]
+        for n, tc in enumerate(calls if isinstance(calls, list) else []):
+            if not isinstance(tc, dict):
+                continue
+            slot = self.calls.setdefault((i, tc.get("index", n)), ["", ""])
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+            if isinstance(fn.get("name"), str):
+                slot[0] += fn["name"]
+            if isinstance(fn.get("arguments"), str):
+                slot[1] += fn["arguments"]
+            elif isinstance(fn.get("arguments"), dict):     # some servers send an object
+                slot[1] += json.dumps(fn["arguments"])
+
+    def problem(self, stream, interrupted=False):
+        """Why this answer's tool calls cannot be used, or None if they can."""
+        if interrupted:
+            return "the answer was cut off"
+        for name, args in self.calls.values():
+            if not name.strip():
+                return "a tool call without a name"
+            if MARKUP.search(name) or MARKUP.search(args):
+                return "model markup in a tool call"
+            if args.strip():
+                try:
+                    value = json.loads(args)
+                except ValueError:
+                    return "tool-call arguments are not valid JSON"
+                if not isinstance(value, dict):
+                    return "tool-call arguments are not a JSON object"
+                if MARKUP.search(json.dumps(value, ensure_ascii=False)):
+                    return "model markup in a tool call"
+        if self.markup:
+            return "model markup in the text"
+        if self.calls:
+            if "length" in self.finish.values():
+                return "a tool call cut off at the length limit"
+            if stream and not self.done:
+                return "the stream ended inside a tool call"
+            if stream and not self.finish:
+                return "the stream ended without a finish reason"
+        return None
+
+
 class SSEScanner:
     """Reads a server-sent-event stream as it passes through and remembers the
     last `usage` it saw. With strip=True (the proxy added
@@ -772,9 +965,10 @@ class SSEScanner:
     is removed; for that, bytes are released one complete event at a time.
     With strip=False every byte is released at once, unchanged."""
 
-    def __init__(self, strip):
+    def __init__(self, strip, observer=None):
         self.strip, self.buf = strip, b""
         self.usage, self.chunks = None, 0
+        self.observer = observer   # called with every `data:` payload (bytes), e.g. ToolCallCheck.payload
 
     def feed(self, data):
         self.buf += data
@@ -807,6 +1001,8 @@ class SSEScanner:
             if not line.startswith(b"data:"):
                 continue
             payload = line[5:].strip()
+            if payload and self.observer is not None:
+                self.observer(payload)
             if not payload or payload == b"[DONE]":
                 continue
             self.chunks += 1
@@ -994,7 +1190,10 @@ class Handler(BaseHTTPRequestHandler):
                     req["stream_options"] = {**(opts if isinstance(opts, dict) else {}), "include_usage": True}
                     body, injected = json.dumps(req).encode(), True
             record = self.meter.record if tenant is None else (lambda *usage: self.gw.record(tid, *usage))
-            self.forward("POST", rest, query, body, model, injected, record, who)
+            malformed = (self.meter.record_malformed if tenant is None
+                         else (lambda *counts: self.gw.record_malformed(tid, *counts)))
+            guard = rest == "chat/completions" and self.cfg.malformed_retries > 0 and offers_tools(req)
+            self.forward("POST", rest, query, body, model, injected, record, who, guard, malformed)
         finally:
             if tenant is not None:
                 self.gw.done(tid)   # hands back the slot taken in admit()
@@ -1035,9 +1234,85 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     # ---- pass-through --------------------------------------------------------
-    def forward(self, method, rest, query, body, model, injected, record=None, who=""):
+    def forward(self, method, rest, query, body, model, injected, record=None, who="", guard=False,
+                malformed=None):
+        """Sends the request upstream and the answer back. With `guard` (a chat
+        completion request that offers tools) a broken tool call is asked again
+        while nothing of the answer has gone to the client (see ToolCallCheck);
+        `malformed` then receives the counters of the broken attempts."""
         cfg, t0 = self.cfg, time.monotonic()
         target = f"{cfg.base_path}/{rest}" + (f"?{query}" if query else "")
+        attempts = 1 + (cfg.malformed_retries if guard else 0)
+        self.out_mode = None            # how the body is framed, once the status line has gone out
+        self.wlock = threading.RLock()  # the keep-alive thread writes too
+        self.keepalive = None
+        bad = []          # broken attempts, held back and not sent (the last one may still be)
+        final = None
+        try:
+            for n in range(attempts):
+                opened = self.open_upstream(method, target, body, rest, who)
+                if opened is None or (cfg.gateway and opened[1].status in GATEWAY_MASKED_STATUS) \
+                        or (bad and not 200 <= opened[1].status < 300):
+                    # No usable answer this time: a broken one held from before is
+                    # better than an error (OpenClaw copes with it as it always did).
+                    if opened is not None:
+                        opened[0].close()
+                    if bad:
+                        final = bad[-1]
+                        log(f"{method} {rest}{who} -> asking again failed; the broken answer is passed on")
+                        break
+                    if opened is None:
+                        self.close_connection = True
+                        return self.send_api_error(502, "upstream_error", "The model endpoint could not be reached.")
+                    # About the shared upstream account (its key, balance or rate
+                    # limit), not about this tenant: the tenant gets a plain 503, never
+                    # a quota or key error that its agent would act on.
+                    log(f"{method} {rest}{who} -> upstream {opened[1].status}{opened[2]}; answered 503")
+                    return self.send_api_error(503, "server_error",
+                                               "The model provider is not available at the moment",
+                                               code="upstream_unavailable")
+                conn, resp, retried = opened
+                metered = record is not None and 200 <= resp.status < 300
+                checked = guard and metered and not (not cfg.gateway and resp.getheader(CHECKED_HEADER))
+                a = Attempt(conn, resp, retried, injected, metered, checked)
+                hold = checked and n + 1 < attempts
+                if hold and a.is_sse and self.keepalive is None and cfg.keepalive_seconds:
+                    self.keepalive = KeepAlive(self, a, cfg.keepalive_seconds)
+                self.relay(a, hold)
+                final = a
+                if a.sent or not a.problem or n + 1 == attempts:
+                    break
+                bad.append(a)
+                log(f"{method} {rest}{who} -> malformed answer ({a.problem}); asking again "
+                    f"({n + 1} of {attempts - 1})")
+            if not final.sent:
+                self.release(final)
+        finally:
+            self.stop_keepalive()
+        if final.interrupted:
+            self.close_connection = True
+
+        took = time.monotonic() - t0
+        if not final.metered:
+            return log(f"{method} {rest}{who} -> {final.status}{final.retried}{final.note} {took:.1f}s")
+        usage, estimated = final.usage(body)
+        record(model, usage[0], usage[1], estimated, usage[2])
+        discarded = [b.usage(body)[0] for b in bad if b is not final]
+        detected = len(bad) + (1 if final.problem and final not in bad else 0)
+        if final.problem:
+            log(f"{method} {rest}{who} -> malformed answer ({final.problem}) passed on"
+                + (" (it had started to stream)" if final.streamed_early else ""))
+        if detected and malformed is not None:
+            malformed(model, detected, len(bad), 1 if final.problem else 0, discarded)
+        log(f"{method} {rest}{who} -> {final.status}{' stream' if final.is_sse else ''} prompt={usage[0]} "
+            f"completion={usage[1]}{f' cached={usage[2]}' if usage[2] else ''}{' (estimated)' if estimated else ''}"
+            f"{f' after {len(bad)} malformed' if bad else ''}{final.retried}{final.note} {took:.1f}s")
+
+    def open_upstream(self, method, target, body, rest, who):
+        """(connection, response, note on retries) for one attempt, asking again
+        on a busy upstream (429 / 503) while nothing has gone to the client; or
+        None if the upstream could not be reached."""
+        cfg = self.cfg
         tries, waited = 0, 0.0
         while True:
             conn = None
@@ -1059,8 +1334,7 @@ class Handler(BaseHTTPRequestHandler):
                 if conn is not None:
                     conn.close()
                 log(f"{method} {rest}{who} -> upstream unreachable ({type(e).__name__})")
-                self.close_connection = True
-                return self.send_api_error(502, "upstream_error", "The model endpoint could not be reached.")
+                return None
             # A busy upstream is asked again here, while nothing has gone to
             # the client yet, so a passing limit of the provider does not
             # reach the agent as an error.
@@ -1073,91 +1347,196 @@ class Handler(BaseHTTPRequestHandler):
                     tries, waited = tries + 1, waited + wait
                     cfg.sleep(wait)
                     continue
-            break
-        retried = f" after {tries} retries ({waited:.1f}s waiting)" if tries else ""
+            return conn, resp, (f" after {tries} retries ({waited:.1f}s waiting)" if tries else "")
 
-        if cfg.gateway and resp.status in GATEWAY_MASKED_STATUS:
-            # About the shared upstream account (its key, balance or rate
-            # limit), not about this tenant: the tenant gets a plain 503, never
-            # a quota or key error that its agent would act on.
-            conn.close()
-            log(f"{method} {rest}{who} -> upstream {resp.status}{retried}; answered 503")
-            return self.send_api_error(503, "server_error", "The model provider is not available at the moment",
-                                       code="upstream_unavailable")
+    def send_head(self, a, length=None):
+        """The status line and headers of attempt `a` (`length` when the whole
+        body is known). Only once per request: after a keep-alive sent the head
+        of an earlier attempt, later attempts go out under it."""
+        with self.wlock:
+            if self.out_mode is not None:
+                return
+            cfg, resp = self.cfg, a.resp
+            self.send_response_only(a.status, resp.reason)
+            for k, v in resp.getheaders():
+                lk = k.lower()
+                if lk not in DROP_RESPONSE and (not cfg.gateway or lk in GATEWAY_RESPONSE_HEADERS):
+                    self.send_header(k, v)
+            if cfg.gateway and a.checked:
+                self.send_header(CHECKED_HEADER, "checked")
+            upstream_length = resp.getheader("Content-Length")
+            if a.status in (204, 304) or a.status < 200:
+                mode = "none"
+            elif length is not None:
+                self.send_header("Content-Length", str(length))
+                mode = "length"
+            elif upstream_length is not None and not (a.is_sse and (a.injected or a.checked)):
+                self.send_header("Content-Length", upstream_length)
+                mode = "length"
+            elif self.request_version == "HTTP/1.0":
+                self.send_header("Connection", "close")
+                self.close_connection = True
+                mode = "close"
+            else:
+                self.send_header("Transfer-Encoding", "chunked")
+                mode = "chunked"
+            self.end_headers()
+            self.out_mode = mode
 
-        status = resp.status
-        is_sse = "text/event-stream" in (resp.getheader("Content-Type") or "").lower()
-        length = resp.getheader("Content-Length")
-        metered = record is not None and 200 <= status < 300
-        self.send_response_only(status, resp.reason)
-        for k, v in resp.getheaders():
-            lk = k.lower()
-            if lk not in DROP_RESPONSE and (not cfg.gateway or lk in GATEWAY_RESPONSE_HEADERS):
-                self.send_header(k, v)
-        if status in (204, 304) or status < 200:
-            mode = "none"
-        elif length is not None and not (is_sse and injected):
-            self.send_header("Content-Length", length)
-            mode = "length"
-        elif self.request_version == "HTTP/1.0":
-            self.send_header("Connection", "close")
-            self.close_connection = True
-            mode = "close"
-        else:
-            self.send_header("Transfer-Encoding", "chunked")
-            mode = "chunked"
-        self.end_headers()
-
-        scan = SSEScanner(strip=injected) if (is_sse and metered) else None
-        kept = bytearray() if (metered and not is_sse) else None
-        note = ""
-
-        def write(data):
-            if mode == "chunked":
+    def write_body(self, data):
+        with self.wlock:
+            if self.out_mode == "none" or not data:
+                return
+            if self.out_mode == "chunked":
                 data = b"%x\r\n%s\r\n" % (len(data), data)
             self.wfile.write(data)  # unbuffered: each piece leaves as it arrives
+            if self.keepalive is not None:
+                self.keepalive.wrote()
 
+    def end_body(self):
+        with self.wlock:
+            if self.out_mode == "chunked":
+                self.wfile.write(b"0\r\n\r\n")
+
+    def relay(self, a, hold):
+        """Reads attempt `a`'s answer. Without `hold` it goes to the client as
+        it arrives. With `hold` it is kept back (a.held) until it is known to
+        be a tool call (then to its end) or plain text longer than the hold
+        limit (then it is released and streams on); a.sent says which."""
+        if not hold:
+            self.stop_keepalive()   # a comment must never land inside a passing event
+            self.send_head(a)
+            a.sent = True
         try:
-            while mode != "none":
-                data = resp.read1(65536)
+            while not a.sent or self.out_mode != "none":
+                data = a.resp.read1(65536)
                 if not data:
                     break
-                if scan is not None:
-                    data = scan.feed(data)
-                elif kept is not None and len(kept) <= KEEP_JSON_BYTES:
-                    kept += data
-                if data:
-                    write(data)
-            if scan is not None:
-                tail = scan.finish()
-                if tail:
-                    write(tail)
-            if mode == "chunked":
-                self.wfile.write(b"0\r\n\r\n")
+                if a.scan is not None:
+                    data = a.scan.feed(data)
+                if a.kept is not None and len(a.kept) <= KEEP_JSON_BYTES:
+                    a.kept += data
+                if not data:
+                    continue
+                if a.sent:
+                    self.write_body(data)
+                    continue
+                a.held += data
+                if len(a.held) > MAX_HOLD_BYTES or (
+                        a.is_sse and not a.check.tool_seen and a.check.text > self.cfg.hold_chars):
+                    self.stop_keepalive()
+                    self.send_head(a)          # plain text (or too big to hold): it streams on from here
+                    a.sent = a.streamed_early = True
+                    self.write_body(bytes(a.held))
+                    a.held = bytearray()
+            if a.scan is not None:
+                tail = a.scan.finish()
+                if a.sent:
+                    self.write_body(tail)
+                else:
+                    a.held += tail
+            if a.sent:
+                self.end_body()
         except (OSError, http.client.HTTPException) as e:
-            self.close_connection = True
-            note = f" interrupted ({type(e).__name__})"
+            a.interrupted = True
+            a.note = f" interrupted ({type(e).__name__})"
         finally:
-            conn.close()
+            a.conn.close()
+        if a.checked:
+            if not a.is_sse and a.kept is not None and len(a.kept) <= KEEP_JSON_BYTES:
+                try:
+                    a.check.message(json.loads(bytes(a.kept)))
+                except ValueError:
+                    pass
+            # An interruption after bytes went out may be the client leaving: not judged.
+            a.problem = None if (a.sent and a.interrupted) else a.check.problem(a.is_sse, a.interrupted)
 
-        took = time.monotonic() - t0
-        if not metered:
-            return log(f"{method} {rest}{who} -> {status}{retried}{note} {took:.1f}s")
-        usage, estimated = None, False
-        if scan is not None:
-            usage = scan.usage
-        elif len(kept) <= KEEP_JSON_BYTES:
+    def stop_keepalive(self):
+        if self.keepalive is not None:
+            self.keepalive.stop()
+
+    def release(self, a):
+        """Sends an answer that was held back in full."""
+        self.stop_keepalive()
+        try:
+            self.send_head(a, length=len(a.held))
+            self.write_body(bytes(a.held))
+            self.end_body()
+        except OSError as e:
+            a.interrupted = True
+            a.note = f" interrupted ({type(e).__name__})"
+        a.sent, a.held = True, bytearray()
+
+
+class KeepAlive:
+    """While a streamed answer is held back for the tool-call check, the client
+    hears an SSE comment (`: keepalive`) every `every` seconds without other
+    output, so its idle watchdog (OpenClaw: about 120 s for a cloud provider)
+    does not end the request. The first comment sends the head of the attempt
+    under watch (a 2xx stream); the answer that is finally passed on, this one
+    or a later one, goes out under that head. A comment is not part of any
+    answer, so asking again after one is still safe."""
+
+    def __init__(self, handler, attempt, every):
+        self.h, self.a, self.every = handler, attempt, every
+        self.last = time.monotonic()
+        self.done = threading.Event()
+        self.sent = 0
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def wrote(self):
+        self.last = time.monotonic()
+
+    def run(self):
+        while not self.done.wait(min(self.every, 1.0)):
+            if time.monotonic() - self.last < self.every:
+                continue
+            with self.h.wlock:
+                if self.done.is_set():
+                    return
+                try:
+                    self.h.send_head(self.a)
+                    if self.h.out_mode in ("chunked", "close"):
+                        self.h.write_body(b": keepalive\n\n")
+                        self.sent += 1
+                except OSError:
+                    return
+
+    def stop(self):
+        with self.h.wlock:
+            self.done.set()
+
+
+class Attempt:
+    """One upstream answer on its way to the client."""
+
+    def __init__(self, conn, resp, retried, injected, metered, checked):
+        self.conn, self.resp, self.retried, self.injected = conn, resp, retried, injected
+        self.metered, self.checked = metered, checked
+        self.status = resp.status
+        self.is_sse = "text/event-stream" in (resp.getheader("Content-Type") or "").lower()
+        self.check = ToolCallCheck() if checked else None
+        observer = self.check.payload if (checked and self.is_sse) else None
+        self.scan = SSEScanner(strip=injected, observer=observer) if (self.is_sse and metered) else None
+        self.kept = bytearray() if (metered and not self.is_sse) else None
+        self.held = bytearray()
+        self.sent = self.streamed_early = self.interrupted = False
+        self.problem, self.note = None, ""
+
+    def usage(self, body):
+        """((prompt, completion, cached), estimated) of this answer."""
+        usage = None
+        if self.scan is not None:
+            usage = self.scan.usage
+        elif self.kept is not None and len(self.kept) <= KEEP_JSON_BYTES:
             try:
-                usage = usage_tokens(json.loads(bytes(kept)))
+                usage = usage_tokens(json.loads(bytes(self.kept)))
             except ValueError:
                 usage = None
-        if usage is None:
-            # The upstream sent no usage: a rough count, so the cap still bites.
-            estimated = True
-            usage = (len(body or b"") // 4, scan.chunks if scan is not None else len(kept) // 4, 0)
-        record(model, usage[0], usage[1], estimated, usage[2])
-        log(f"{method} {rest}{who} -> {status}{' stream' if is_sse else ''} prompt={usage[0]} completion={usage[1]}"
-            f"{f' cached={usage[2]}' if usage[2] else ''}{' (estimated)' if estimated else ''}{retried}{note} {took:.1f}s")
+        if usage is not None:
+            return usage, False
+        # The upstream sent no usage: a rough count, so the cap still bites.
+        return (len(body or b"") // 4, self.scan.chunks if self.scan is not None else len(self.kept or b"") // 4, 0), True
 
 
 class AdminHandler(BaseHTTPRequestHandler):
