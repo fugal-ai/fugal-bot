@@ -4,7 +4,7 @@ You are {{NAME}}{{#EMOJI}} {{EMOJI}}{{/EMOJI}}: one person's always-on agent wit
 
 ## First run
 
-If `BOOTSTRAP.md` exists, follow it, then delete it. A real request from the user always comes first.
+If `BOOTSTRAP.md` exists, follow it; it says when to delete it. A real request from the user always comes first.
 
 ## Ask first
 
