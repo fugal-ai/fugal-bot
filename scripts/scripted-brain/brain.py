@@ -23,6 +23,11 @@ What it answers, by the person's last message (OpenClaw's own trailing
             from the workspace files> --text`; automations add (the daily
             job); exec (notes, rm BOOTSTRAP.md); the report + one line
        "Run the daily stake report now: job <id>" -> automations run (forced)
+       "Watch this hotkey for me: <hotkey> on subnet 70 ... <Area/City>" -> exec
+            `taoq hotkey <hotkey> --netuid 70 --watch --text`; automations add
+            (a SCRIPT job: the script is copied out of the recipe in AGENTS.md,
+            so the test runs the very text a real model is given); the reply
+       "Run the hotkey watch now: job <id>" -> automations run (forced)
        a job's own message "Run exactly: taoq ..." -> exec it; reply with its
             output (BRAIN_TAOQ_ENV, e.g. a recorded fixture, goes in front of
             every taoq command)
@@ -100,6 +105,11 @@ JOB_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 STAMP = re.compile(r"^\s*\[[^\]\n]{0,80}\]\s*")
 
 
+HOTKEY = re.compile(r"hotkey[^5]*?(5[1-9A-HJ-NP-Za-km-z]{46,48})")
+# The script payload of the watch recipe in AGENTS.md: payload: {kind: "script", script: "<JSON string>"}
+WATCH_SCRIPT = re.compile(r'script: ("(?:[^"\\]|\\.)*")\}')
+
+
 def first_conversation(ask, system, tools, results):
     step = len(results)
     ask = STAMP.sub("", ask)
@@ -134,7 +144,22 @@ def first_conversation(ask, system, tools, results):
         first = text_of(results[0].get("content"))
         return ("text", f"{first.strip()}\n\nScheduled: this report every day at 08:00 {zone}. "
                         "Ask me to change or stop it.", None)
-    if ask.lower().startswith("run the daily stake report now"):
+    if ask.lower().startswith("watch this hotkey") and HOTKEY.search(ask) and ZONE.search(ask):
+        hk, zone = HOTKEY.search(ask).group(1), ZONE.search(ask).group(1)
+        watch = f"taoq hotkey {hk} --netuid 70 --watch --text"
+        if step == 0:
+            return call_tool(tools, "exec", {"command": taoq_cmd(watch)})
+        if step == 1:
+            recipe = WATCH_SCRIPT.search(system)
+            if not recipe:
+                return ("text", "SCRIPTED-BRAIN: no script recipe in the workspace files", None)
+            script = json.loads(recipe.group(1)).replace("<COMMAND>", taoq_cmd(watch))
+            job = {"name": "Hotkey watch", "schedule": {"kind": "cron", "expr": "0 */6 * * *", "tz": zone},
+                   "sessionTarget": "isolated", "payload": {"kind": "script", "script": script}}
+            return call_tool(tools, "automations", {"action": "add", "job": job}, "cron")
+        return ("text", f"{text_of(results[0].get('content')).strip()}\n\nScheduled: the hotkey watch every 6 hours. "
+                        "Ask me to change or stop it.", None)
+    if ask.lower().startswith(("run the daily stake report now", "run the hotkey watch now")):
         jid = JOB_ID.search(ask)
         if step == 0 and jid:
             return call_tool(tools, "automations", {"action": "run", "jobId": jid.group(0), "runMode": "force",

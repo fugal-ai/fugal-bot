@@ -26,7 +26,9 @@ Options: `--text` (report for a person), `--no-save` (write no snapshot),
 `stake --since-hours H` (compare with the newest snapshot at least H hours
 old, default 20; else the oldest snapshot at least an hour old),
 `stake --price-alert PCT` (default 10), `stake --stale-blocks N` (default 3
-tempos), `subnet --since-hours H`, `week --top N`, `week --no-archive`.
+tempos), `subnet --since-hours H`, `week --top N`, `week --no-archive`,
+`hotkey|subnet --watch` (below; `subnet --price-alert PCT` also sets the
+watch's threshold).
 
 Examples from finney (block 9568260, trimmed):
 
@@ -44,6 +46,79 @@ Compared with block 9517872 (7.0 days earlier, archive node).
 Up: SN35 logic +137.5%, SN26 Pocket +106.8%, SN40 Ralph +39.9%, ...
 New: SN57 Roa (1.5 d), SN84 ansuz (3.0 d), SN109 armeni (4.5 d), SN113 gje (6.0 d)
 ```
+
+## Watches: only what is new
+
+A scheduled watch used to repeat every warning on every run (a validator that
+had not set weights for 2,000 blocks was reported four times a day), and the
+model turned `low` readings into "deregistration risks". `--watch` on `hotkey`
+and `subnet` makes the tool itself decide what is worth saying.
+
+Each finding has a **stable key** and a **severity** (`info`, `warning`,
+`critical`). The findings of the last check are kept in
+`$TAOQ_DATA_DIR/watch-hotkey-<hotkey>-<snN|all>.json` /
+`watch-subnet-<netuids>.json` (next to the other snapshots; `--no-save` reads
+them but writes nothing). A run compares and prints:
+
+```
+$ taoq hotkey 5E2LP6… --netuid 70 --watch          (six hours after the last check)
+{"ok":true,"command":"hotkey","watch":true,"alert":true,"hotkey":"5E2LP6…","registered_on":[70],
+ "block":9568291,"at":"…","first_check":false,"previous_check":{"at":"…","block":9566131,"hours":6.0},
+ "new":[{"key":"deregistration:SN70","severity":"warning","text":"SN70 uid 1: deregistration risk high (position 3 of 241 …)"}],
+ "escalated":[],"resolved":[{"key":"weights_stale:SN70","was":"warning","text":"…"}],
+ "ongoing":["permit_lost:SN12 warning since 2026-11-22T08:00:00Z"],
+ "summary":"1 new, 0 worse, 1 resolved; 1 unchanged (do not repeat those)"}
+
+$ taoq hotkey 5E2LP6… --netuid 70 --watch          (nothing changed)
+{"ok":true,"command":"hotkey","watch":true,"alert":false,…,"new":[],"escalated":[],"resolved":[],"ongoing":[…],
+ "summary":"nothing new, worse or resolved since 2026-11-23T02:13:20Z; send no message"}
+```
+
+- `new`: not in the last check. `escalated`: there, but the severity went up
+  (`was` names the old one). `resolved`: there before, gone now. `ongoing`:
+  there before at the same severity (or a lower one), listed in one short
+  string each with the time it was first seen; never to be told again, even
+  though its numbers (blocks since weights) have moved.
+- **`alert` is true when there is anything in `new`, `escalated` or `resolved`
+  (a cleared problem is news), and on the first check** (which records the
+  state and prints the full report). Otherwise it is false and the summary says
+  to send no message. A watch result has no metagraph dump: it is a few hundred
+  bytes when quiet.
+- With `--text` the output is, when `alert` is false, exactly `NO_REPLY`: the
+  token OpenClaw's scheduler does not deliver. Otherwise one line per finding
+  (`NEW warning: …`, `WORSE, now critical (was warning): …`, `RESOLVED (was …): …`)
+  and one `Same as before, not new: …` line. Amounts keep their exact decimals;
+  an event's numbers are also in its `data` object.
+
+What counts, for `hotkey`: `deregistration:SN<n>` (reading `next` is `critical`,
+`high` is `warning`; `medium` and `low` are normal and never a finding),
+`weights_stale:SN<n>` (a validator permit and no weights for over 3 tempos:
+`warning`; the block count is in `data`, not in the key), `permit_lost:SN<n>`
+(`warning`) and `registration_lost:SN<n>` (`critical`), both remembered until
+regained. For `subnet`, all events (told when they happen, not kept):
+`price_move:SN<n>` (`warning`, a move of `--price-alert` percent, default 10,
+since the last check, with `price_before`, `price_after` and `price_pct` in
+`data`), `subnet_replaced:SN<n>` (`critical`: the netuid has a new registration
+block) and `release:SN<n>:<tag>` (`info`: a GitHub release that was not in the
+last check's list, read from the public API link, not read in fixture mode; if
+it cannot be read it is named in `unread` and the old list is kept). The first
+check only records the baseline.
+
+**Silent finish, no model call (checked against OpenClaw 2026.11.6's docs and
+tool schema).** Possible, and the seed recipe uses it: the `automations` tool
+accepts `payload: {kind: "script", script: …}` (agent-created; a `command`
+payload can only be made by the operator CLI). The script runs headless in
+OpenClaw's Code Mode with the agent's `exec`, makes no model call, and its
+returned `notify` text is delivered to the creating conversation; a script that
+returns nothing delivers nothing. The recipe's script runs the `taoq … --watch
+--text` command, throws if it fails (an error in the run history, never a
+silent miss) and returns `{notify: output}` unless the output is `NO_REPLY`.
+So a quiet check costs 0 model calls and an alert costs 0 too (4 checks a day
+used to be 8 calls). If a gateway turns scripts off (`cron.triggers.enabled:
+false`) the recipe falls back to an `agentTurn` that runs the command and
+replies `NO_REPLY` or the output unchanged: 2 calls per check. The container
+tests (`scripts/first-conversation.sh`) run exactly the recipe text from
+`AGENTS.md`: a quiet check and a delivered change, each with no model call.
 
 ## Units (every output)
 
@@ -205,11 +280,8 @@ report is delivered into the conversation that created the job
 **Cost of one daily report: 2 model calls.** The run is an isolated turn with
 `lightContext` (no workspace files in the prompt; a scheduled run never gets
 `BOOTSTRAP.md`) and only the `exec` tool: call 1 asks for `taoq stake ... --text`,
-call 2 writes the report from its output. A watch that finds nothing replies
-`NO_REPLY`, which OpenClaw does not deliver; it still costs 2 calls per run
-(4 runs a day for the 6-hourly watches). OpenClaw's trigger scripts could run
-`taoq` with no model call and wake the model only when there is something to
-say; not used yet.
+call 2 writes the report from its output. The 6-hourly watches are
+script jobs (see "Watches" above) and make no model call at all, quiet or not.
 
 ## Real-model check (to run once, by someone with a key)
 
@@ -241,7 +313,8 @@ stake), in the web chat:
    websocket code in the tool calls; more than one `taoq` run per request; the
    file left in place; a greeting that mentions its instructions.
 
-Optional: `Watch subnet 70 for me` (expect `taoq subnet 70 --text` once and a
-6-hourly "Subnet watch" job), `Watch hotkey <ss58> on subnet 70` (a "Hotkey
-watch" job), `What happened on Bittensor this week?` (`taoq week --text`, then
+Optional: `Watch subnet 70 for me` (expect `taoq subnet 70 --watch --text` once
+and a 6-hourly "Subnet watch" script job), `Watch hotkey <ss58> on subnet 70`
+(a "Hotkey watch" script job; later checks send nothing unless something
+changed), `What happened on Bittensor this week?` (`taoq week --text`, then
 a short brief).

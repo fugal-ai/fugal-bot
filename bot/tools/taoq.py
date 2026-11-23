@@ -8,6 +8,7 @@ prints one line of JSON (or, with --text, a short report for a person).
     taoq stake <coldkey>            stake positions, values, change since the last run, flags
     taoq subnet <netuid>...         price, pool, emission, neurons, registration cost, owner, links
     taoq hotkey <hotkey> [--netuid N]   a miner's / validator's standing on each subnet, deregistration risk
+    taoq hotkey|subnet ... --watch  the same, for a scheduled job: only what is new, worse or resolved
     taoq week                       price movers, new subnets, emission changes over about 7 days
     taoq subnet-brief <netuid>      the on-chain facts for a deep dive on one subnet
 
@@ -465,6 +466,113 @@ def head(r: Reader, t_now: float) -> dict:
     return {"block": r.block, "at": iso(t_now), "finalized": True}
 
 
+# ---- watches: only what is new --------------------------------------------------
+# `taoq hotkey --watch` and `taoq subnet --watch` are for scheduled jobs. Every
+# finding has a stable key (for example weights_stale:SN70) and a severity. The
+# findings of the last check are kept in $TAOQ_DATA_DIR/watch-*.json; a run tells
+# only what is new, what got worse, and what cleared, and says in one field
+# ("alert") whether there is anything to tell. What is unchanged is listed in
+# one short line and is not to be repeated to the user.
+SEVERITIES = {"info": 0, "warning": 1, "critical": 2}
+NO_REPLY = "NO_REPLY"    # the token OpenClaw's scheduler does not deliver
+WATCH_NOTE = "Watching from now: I will message you only when something new or worse shows up, or a problem clears."
+
+
+def watch_path(kind: str, ident: str) -> str:
+    return os.path.join(data_dir(), f"watch-{kind}-{ident}.json")
+
+
+def load_watch(path: str) -> dict | None:
+    """The state of the last check, or None (first check, or an unusable file)."""
+    st = load_json(path, None)
+    if not isinstance(st, dict) or not isinstance(st.get("alerts"), dict) or not isinstance(st.get("at"), (int, float)):
+        return None
+    return st
+
+
+def save_watch(path: str, found_state: dict, memo: dict, block: int, t_now: float):
+    save_json(path, {"version": VERSION, "at": t_now, "block": block, "alerts": found_state, "memo": memo})
+
+
+def _by_severity(items):
+    return sorted(items, key=lambda i: (-SEVERITIES[i["severity"]], i["key"]))
+
+
+def watch_diff(prev_alerts: dict | None, found: dict, t_now: float) -> dict:
+    """Compare this check's findings with the last check's.
+
+    found: key -> {"severity", "text", optional "event": True}. A condition
+    (no "event") stays `ongoing` for as long as it holds at the same severity.
+    An event (a price move, a release) is `new` when it happens and is not kept.
+    Returns new / escalated / ongoing (short strings) / resolved, and `stored`:
+    the conditions to keep for the next check."""
+    prev_alerts = prev_alerts or {}
+    new, escalated, ongoing, resolved, stored = [], [], [], [], {}
+    for key in sorted(found):
+        f = found[key]
+        item = {"key": key, "severity": f["severity"], "text": f["text"]}
+        if "data" in f:
+            item["data"] = f["data"]
+        if f.get("event"):
+            new.append(item)
+            continue
+        old = prev_alerts.get(key)
+        if not isinstance(old, dict) or old.get("severity") not in SEVERITIES:
+            new.append(item)
+            stored[key] = {"severity": f["severity"], "text": f["text"], "since": iso(t_now)}
+            continue
+        since = old.get("since") or iso(t_now)
+        stored[key] = {"severity": f["severity"], "text": f["text"], "since": since}
+        if SEVERITIES[f["severity"]] > SEVERITIES[old["severity"]]:
+            escalated.append({**item, "was": old["severity"]})
+        else:
+            ongoing.append(f"{key} {f['severity']} since {since}")   # also when it got better: not an alert
+    for key in sorted(prev_alerts):
+        old = prev_alerts[key]
+        if key not in found and isinstance(old, dict):
+            resolved.append({"key": key, "was": old.get("severity"), "text": old.get("text")})
+    return {"new": _by_severity(new), "escalated": _by_severity(escalated), "ongoing": ongoing,
+            "resolved": resolved, "stored": stored}
+
+
+def watch_output(command: str, who: dict, block: int, t_now: float, prev: dict | None, diff: dict, unread: list) -> dict:
+    first = prev is None
+    alert = first or bool(diff["new"] or diff["escalated"] or diff["resolved"])
+    out = {"ok": True, "command": command, "watch": True, "alert": alert, **who, **head_dict(block, t_now),
+           "first_check": first,
+           "previous_check": None if first else {"at": iso(prev["at"]), "block": prev["block"],
+                                                 "hours": round((t_now - prev["at"]) / 3600, 1)},
+           "new": diff["new"], "escalated": diff["escalated"], "resolved": diff["resolved"], "ongoing": diff["ongoing"]}
+    if first:
+        out["summary"] = "first check: the current state is now recorded; later checks report only changes"
+    elif alert:
+        out["summary"] = (f"{len(diff['new'])} new, {len(diff['escalated'])} worse, {len(diff['resolved'])} resolved; "
+                          f"{len(diff['ongoing'])} unchanged (do not repeat those)")
+    else:
+        out["summary"] = f"nothing new, worse or resolved since {iso(prev['at'])}; send no message"
+    if unread:
+        out["unread"] = unread
+    return out
+
+
+def watch_text(o: dict, label: str, first_report: str) -> str:
+    """alert false: exactly NO_REPLY. First check: the full report and a note."""
+    if not o["alert"]:
+        return NO_REPLY
+    if o["first_check"]:
+        lines = [first_report, WATCH_NOTE]
+    else:
+        lines = [f"{label} (block {o['block']}, {o['at']}), {o['previous_check']['hours']} h since the last check"]
+        lines += [f"NEW {i['severity']}: {i['text']}" for i in o["new"]]
+        lines += [f"WORSE, now {i['severity']} (was {i['was']}): {i['text']}" for i in o["escalated"]]
+        lines += [f"RESOLVED (was {i['was']}): {i['text']}" for i in o["resolved"]]
+        if o["ongoing"]:
+            lines.append("Same as before, not new: " + "; ".join(o["ongoing"]))
+    if o.get("unread"):
+        lines.append("Could not read: " + "; ".join(o["unread"]))
+    return "\n".join(lines)
+
+
 # ---- stake -------------------------------------------------------------------------
 async def _stake_reads(r: Reader, coldkey: str):
     subnets, infos, account = await asyncio.gather(
@@ -791,6 +899,77 @@ def subnet_text_one(s: dict) -> str:
     return "\n".join(lines)
 
 
+def fetch_releases(url: str, timeout: float = 10) -> list | None:
+    """Recent GitHub releases (newest first) from a releases_api link, or None if
+    they could not be read. Public API, no token. Never touches the network in
+    fixture mode (TAOQ_FIXTURE) unless TAOQ_RELEASES_FIXTURE gives the answers."""
+    fx = os.environ.get("TAOQ_RELEASES_FIXTURE")
+    try:
+        if fx:
+            with open(fx, encoding="utf-8") as f:
+                data = json.load(f).get(url)
+        elif os.environ.get("TAOQ_FIXTURE"):
+            return None
+        else:
+            if not url.startswith("https://api.github.com/repos/"):
+                return None
+            import urllib.request  # noqa: PLC0415
+            req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "taoq"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https, fixed host)
+                data = json.loads(resp.read(2_000_000))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    return [{"tag": str(x.get("tag_name") or ""), "name": str(x.get("name") or x.get("tag_name") or ""),
+             "published_at": x.get("published_at"), "url": x.get("html_url"), "prerelease": bool(x.get("prerelease"))}
+            for x in data if isinstance(x, dict) and x.get("tag_name") and not x.get("draft")]
+
+
+def subnet_watch(items: list, subnets: dict, releases: dict, prev: dict | None, threshold: Decimal) -> tuple[dict, dict, list]:
+    """(findings, memo for the next check, unread). All findings are events:
+    a price move since the last check, a subnet replaced by another one, a new
+    release. The first check only records the state."""
+    memo_prev = (prev or {}).get("memo") or {}
+    old_price = memo_prev.get("price_rao") or {}
+    old_reg = memo_prev.get("registered_at") or {}
+    old_rel = memo_prev.get("releases_seen") or {}
+    found, unread = {}, []
+    memo = {"price_rao": {}, "registered_at": {}, "releases_seen": {}}
+    for it in items:
+        n = it["netuid"]
+        sn = subnets[n]
+        label = f"SN{n} {sn['name'] or ''}".strip()
+        memo["price_rao"][str(n)] = sn["price_rao"]
+        memo["registered_at"][str(n)] = sn["registered_at"]
+        replaced = str(n) in old_reg and old_reg[str(n)] != sn["registered_at"]
+        if replaced:
+            found[f"subnet_replaced:SN{n}"] = {"severity": "critical", "event": True,
+                                               "text": f"{label}: this netuid now belongs to a different subnet (registered at block {sn['registered_at']}, it was {old_reg[str(n)]})"}
+        elif n and sn["price_rao"] is not None and old_price.get(str(n)):
+            ch = pct(sn["price_rao"], old_price[str(n)])
+            if ch is not None and abs(ch) >= threshold:
+                found[f"price_move:SN{n}"] = {"severity": "warning", "event": True,
+                                              "text": f"{label}: price {signed(ch, 2)}% since the last check ({_num(tao(old_price[str(n)]))} to {_num(tao(sn['price_rao']))} TAO per alpha)",
+                                              "data": {"price_before": tao(old_price[str(n)]), "price_after": tao(sn["price_rao"]), "price_pct": ch}}
+        seen = old_rel.get(str(n))
+        rels = releases.get(n)
+        if it.get("releases_api") and rels is None:
+            unread.append(f"releases of SN{n}")
+        if rels is not None:
+            tags = [x["tag"] for x in rels]
+            if seen is not None:
+                for x in rels:
+                    if x["tag"] not in seen:
+                        pre = " (pre-release)" if x["prerelease"] else ""
+                        found[f"release:SN{n}:{x['tag']}"] = {"severity": "info", "event": True,
+                                                              "text": f"{label}: new release {x['tag']}{pre}, published {x['published_at']} {x['url'] or ''}".rstrip()}
+            memo["releases_seen"][str(n)] = sorted(set(tags) | set(seen or []))[-30:]
+        elif seen is not None:
+            memo["releases_seen"][str(n)] = seen
+    return found, memo, unread
+
+
 def cmd_subnet(args):
     netuids = list(dict.fromkeys(args.netuid))
     reads, r = run_read(lambda rd: _subnet_reads(rd, netuids))
@@ -802,7 +981,21 @@ def cmd_subnet(args):
     notes = price_notes(reads["subnets"], netuids)
     if notes:
         out["notes"] = notes
-    return out, lambda o: "\n".join(subnet_text_one(s) for s in o["subnets"])
+
+    def text(o):
+        return "\n".join(subnet_text_one(s) for s in o["subnets"])
+    if not args.watch:
+        return out, text
+
+    path = watch_path("subnet", "-".join(str(n) for n in sorted(netuids)))
+    prev = load_watch(path)
+    releases = {it["netuid"]: fetch_releases(it["releases_api"]) for it in items if it.get("releases_api")}
+    found, memo, unread = subnet_watch(items, reads["subnets"], releases, prev, Decimal(str(args.price_alert)))
+    diff = watch_diff(prev["alerts"] if prev else None, found, t_now)
+    w = watch_output("subnet", {"netuids": netuids}, r.block, t_now, prev, diff, unread)
+    if not args.no_save:
+        save_watch(path, diff["stored"], memo, r.block, t_now)
+    return w, lambda o: watch_text(o, "Subnet watch " + ", ".join(f"SN{n}" for n in netuids), text(out))
 
 
 # ---- hotkey ------------------------------------------------------------------------
@@ -933,6 +1126,47 @@ def hotkey_entry(n: int, uid: int, g: dict, lite: dict, sn: dict, block: int, ho
     return e
 
 
+def hotkey_findings(e: dict, tempo: int) -> dict:
+    """What is worth a warning about one registration: key -> {severity, text}.
+    Only a deregistration reading of next (critical) or high (warning), and a
+    validator that has not set weights for over 3 tempos (warning); the readings
+    medium and low are normal and are never findings."""
+    n, tag = e["netuid"], f"SN{e['netuid']} uid {e['uid']}"
+    found = {}
+    risk = e["deregistration"]["risk"]
+    if risk in ("next", "high"):
+        found[f"deregistration:SN{n}"] = {"severity": "critical" if risk == "next" else "warning",
+                                          "text": f"{tag}: deregistration risk {risk} ({e['deregistration']['text']})"}
+    since = e["blocks_since_weights"]
+    if e["validator_permit"] and since is not None and since > 3 * (tempo + 1):
+        found[f"weights_stale:SN{n}"] = {"severity": "warning",
+                                         "text": f"{tag}: has a validator permit but last set weights {since} blocks (about {since * 12 / 3600:.1f} h) ago",
+                                         "data": {"blocks_since_weights": since}}
+    return found
+
+
+def hotkey_watch(entries: list, subnets: dict, prev: dict | None, t_now: float) -> tuple[dict, dict]:
+    """(findings, memo for the next check). Losing a registration or a validator
+    permit is remembered until it is regained, so it stays `ongoing` and then
+    `resolved` instead of being told once and forgotten."""
+    memo_prev = (prev or {}).get("memo") or {}
+    was = {int(n): v for n, v in (memo_prev.get("registered") or {}).items()}
+    now_reg = {e["netuid"]: {"permit": e["validator_permit"], "uid": e["uid"]} for e in entries}
+    found = {}
+    for e in entries:
+        found.update(hotkey_findings(e, subnets[e["netuid"]]["tempo"]))
+    lost_reg = (set(memo_prev.get("lost_registration") or []) | (set(was) - set(now_reg))) - set(now_reg)
+    lost_permit = set(memo_prev.get("lost_permit") or [])
+    lost_permit |= {n for n, v in was.items() if v.get("permit") and n in now_reg and not now_reg[n]["permit"]}
+    lost_permit = {n for n in lost_permit if n in now_reg and not now_reg[n]["permit"]}
+    for n in sorted(lost_reg):
+        found[f"registration_lost:SN{n}"] = {"severity": "critical", "text": f"SN{n}: the hotkey is no longer registered on this subnet (it was at an earlier check)"}
+    for n in sorted(lost_permit):
+        found[f"permit_lost:SN{n}"] = {"severity": "warning", "text": f"SN{n} uid {now_reg[n]['uid']}: lost its validator permit (it had one at an earlier check)"}
+    memo = {"registered": {str(n): v for n, v in now_reg.items()}, "lost_registration": sorted(lost_reg), "lost_permit": sorted(lost_permit)}
+    return found, memo
+
+
 def cmd_hotkey(args):
     hk = check_ss58(args.hotkey, "the hotkey")
     reads, r = run_read(lambda rd: _hotkey_reads(rd, hk, args.netuid))
@@ -941,10 +1175,7 @@ def cmd_hotkey(args):
                for (n, u), g, lite in zip(reads["on"], reads["graphs"], reads["lites"])]
     flags = []
     for e in entries:
-        if e["deregistration"]["risk"] in ("next", "high"):
-            flags.append(f"SN{e['netuid']} uid {e['uid']}: deregistration risk {e['deregistration']['risk']} ({e['deregistration']['text']})")
-        if e["validator_permit"] and e["blocks_since_weights"] is not None and e["blocks_since_weights"] > 3 * (reads["subnets"][e["netuid"]]["tempo"] + 1):
-            flags.append(f"SN{e['netuid']} uid {e['uid']}: has a validator permit but last set weights {e['blocks_since_weights']} blocks ago")
+        flags += [f["text"] for f in hotkey_findings(e, reads["subnets"][e["netuid"]]["tempo"]).values()]
     out = {"ok": True, "command": "hotkey", "hotkey": hk, "owner_coldkey": reads["owner"], **head_dict(r.block, t_now),
            "registered_on": [e["netuid"] for e in entries], "subnets": entries, "flags": flags}
     if not args.no_save:
@@ -962,7 +1193,17 @@ def cmd_hotkey(args):
                          f"deregistration: {e['deregistration']['risk']} ({e['deregistration']['text']})")
         lines += [f"! {f}" for f in o["flags"]]
         return "\n".join(lines)
-    return out, text
+    if not args.watch:
+        return out, text
+
+    path = watch_path("hotkey", f"{hk}-{'sn' + str(args.netuid) if args.netuid is not None else 'all'}")
+    prev = load_watch(path)
+    found, memo = hotkey_watch(entries, reads["subnets"], prev, t_now)
+    diff = watch_diff(prev["alerts"] if prev else None, found, t_now)
+    w = watch_output("hotkey", {"hotkey": hk, "registered_on": out["registered_on"]}, r.block, t_now, prev, diff, [])
+    if not args.no_save:
+        save_watch(path, diff["stored"], memo, r.block, t_now)
+    return w, lambda o: watch_text(o, f"Hotkey watch {short(hk)}", text(out))
 
 
 # ---- week --------------------------------------------------------------------------
@@ -1115,6 +1356,10 @@ def cmd_brief(args):
 
 
 # ---- main --------------------------------------------------------------------------
+WATCH_HELP = ("for a scheduled watch: report only what is new, worse or resolved since the last check "
+              '("alert": false = nothing to tell; with --text the output is then exactly NO_REPLY); the first check records the state')
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="taoq", description="Read-only Bittensor chain reports (JSON). Units: see --help-units.",
                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__.split("Units (every output):")[1].split("Exit status")[0])
@@ -1135,10 +1380,13 @@ def build_parser():
     s = common(sub.add_parser("subnet", help="facts about one or more subnets"))
     s.add_argument("netuid", type=int, nargs="+")
     s.add_argument("--since-hours", type=float, default=20)
+    s.add_argument("--watch", action="store_true", help=WATCH_HELP)
+    s.add_argument("--price-alert", type=float, default=10, help="with --watch: a price move of at least this many percent since the last check is an event (default 10)")
     s.set_defaults(fn=cmd_subnet)
     s = common(sub.add_parser("hotkey", help="a hotkey's standing on each subnet"))
     s.add_argument("hotkey")
     s.add_argument("--netuid", type=int, default=None)
+    s.add_argument("--watch", action="store_true", help=WATCH_HELP)
     s.set_defaults(fn=cmd_hotkey)
     s = common(sub.add_parser("week", help="price movers, new subnets, emission changes over about 7 days"))
     s.add_argument("--top", type=int, default=5)

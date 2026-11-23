@@ -47,9 +47,10 @@ class Run:
         self.env = {"TAOQ_FIXTURE": FIXTURE, "TAOQ_DATA_DIR": self.dir, "TAOQ_NOW": str(T0),
                     "TAOQ_ENDPOINTS": "ws://127.0.0.1:9"}
 
-    def __call__(self, *args, now=None):
-        old = {k: os.environ.get(k) for k in self.env}
-        os.environ.update(self.env)
+    def __call__(self, *args, now=None, env=None):
+        merged = {**self.env, **(env or {})}
+        old = {k: os.environ.get(k) for k in merged}
+        os.environ.update(merged)
         if now is not None:
             os.environ["TAOQ_NOW"] = str(now)
         out, err = io.StringIO(), io.StringIO()
@@ -227,6 +228,310 @@ class TestFixture(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
+
+def variant(mutate) -> str:
+    """A copy of the recorded read with `mutate(reads)` applied; returns its path."""
+    fx = raw()
+    mutate(fx["reads"])
+    fd, path = tempfile.mkstemp(suffix=".json.gz")
+    os.close(fd)
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(fx, f)
+    return path
+
+
+MG70 = taoq._key("call", "SubnetInfoRuntimeApi", "get_metagraph", [70])
+PRICES = taoq._key("call", "SwapRuntimeApi", "current_alpha_price_all", [])
+DYN = taoq._key("call", "SubnetInfoRuntimeApi", "get_all_dynamic_info", [])
+UIDS70 = taoq._key("multi", "SubtensorModule", "Uids", [[70, VALI_HK]])
+BLOCK = raw()["block"]
+H6 = 6 * 3600
+
+
+def validator_state(weights_age=None, emission=None, reg=None, permit=None):
+    """A mutation of the recorded SN70 metagraph for the validator VALI_HK."""
+    def mutate(reads):
+        mg = reads[MG70]
+        u = mg["hotkeys"].index(VALI_HK)
+        if weights_age is not None:
+            mg["last_update"][u] = BLOCK - weights_age
+        if emission is not None:
+            mg["emission"][u] = emission
+        if reg is not None:
+            mg["block_at_registration"][u] = reg
+        if permit is not None:
+            mg["validator_permit"][u] = permit
+    return mutate
+
+
+class TestWatchDiff(unittest.TestCase):
+    """The comparison itself, on recorded sequences of findings."""
+
+    W = {"weights_stale:SN70": {"severity": "warning", "text": "SN70 uid 1: last set weights 2000 blocks ago"}}
+    D_HIGH = {"deregistration:SN70": {"severity": "warning", "text": "risk high"}}
+    D_NEXT = {"deregistration:SN70": {"severity": "critical", "text": "risk next"}}
+
+    def step(self, prev, found, t):
+        d = taoq.watch_diff(prev, found, t)
+        return d, d["stored"]
+
+    def test_new_ongoing_escalated_resolved(self):
+        d, st = self.step(None, self.W, T0)                    # new
+        self.assertEqual([i["key"] for i in d["new"]], ["weights_stale:SN70"])
+        self.assertEqual((d["ongoing"], d["resolved"], d["escalated"]), ([], [], []))
+        d, st = self.step(st, self.W, T0 + H6)                 # the same, hours later: ongoing, nothing new
+        self.assertEqual((d["new"], d["escalated"], d["resolved"]), ([], [], []))
+        self.assertEqual(d["ongoing"], [f"weights_stale:SN70 warning since {taoq.iso(T0)}"])
+        d, st = self.step(st, {**self.W, **self.D_HIGH}, T0 + 2 * H6)   # one more problem: only that one is new
+        self.assertEqual([i["key"] for i in d["new"]], ["deregistration:SN70"])
+        self.assertEqual(len(d["ongoing"]), 1)
+        d, st = self.step(st, {**self.W, **self.D_NEXT}, T0 + 3 * H6)   # severity went up
+        self.assertEqual([(i["key"], i["was"], i["severity"]) for i in d["escalated"]], [("deregistration:SN70", "warning", "critical")])
+        self.assertEqual(d["new"], [])
+        self.assertEqual(st["deregistration:SN70"]["since"], taoq.iso(T0 + 2 * H6))   # "since" is kept through an escalation
+        d, st = self.step(st, {**self.W, **self.D_HIGH}, T0 + 4 * H6)   # better again: not an alert
+        self.assertEqual((d["new"], d["escalated"], d["resolved"]), ([], [], []))
+        self.assertIn("deregistration:SN70 warning since", " ".join(d["ongoing"]))
+        d, st = self.step(st, {**self.W, **self.D_NEXT}, T0 + 5 * H6)   # worse again: told again
+        self.assertEqual(len(d["escalated"]), 1)
+        d, st = self.step(st, {}, T0 + 6 * H6)                          # everything cleared
+        self.assertEqual(sorted(i["key"] for i in d["resolved"]), ["deregistration:SN70", "weights_stale:SN70"])
+        self.assertEqual((d["new"], d["ongoing"], st), ([], [], {}))
+        d, st = self.step(st, self.W, T0 + 7 * H6)                      # and back: new again
+        self.assertEqual(len(d["new"]), 1)
+
+    def test_events_are_new_every_time_and_not_kept(self):
+        ev = {"price_move:SN70": {"severity": "warning", "event": True, "text": "up 12 %"}}
+        d, st = self.step({}, ev, T0)
+        self.assertEqual((len(d["new"]), st), (1, {}))
+        d, st = self.step(st, ev, T0 + H6)
+        self.assertEqual(len(d["new"]), 1)
+        d, st = self.step(st, {}, T0 + 2 * H6)
+        self.assertEqual((d["new"], d["resolved"]), ([], []))
+
+    def test_new_sorted_by_severity(self):
+        found = {"b": {"severity": "info", "text": "i"}, "a": {"severity": "warning", "text": "w"}, "c": {"severity": "critical", "text": "c"}}
+        self.assertEqual([i["key"] for i in taoq.watch_diff(None, found, T0)["new"]], ["c", "a", "b"])
+
+    def test_alert_field(self):
+        prev = {"at": T0, "block": 1}
+        quiet = taoq.watch_diff({}, {}, T0 + H6)
+        o = taoq.watch_output("hotkey", {}, 2, T0 + H6, prev, quiet, [])
+        self.assertIs(o["alert"], False)
+        self.assertIn("send no message", o["summary"])
+        self.assertEqual(taoq.watch_text(o, "x", "full report"), "NO_REPLY")
+        ongoing_only = taoq.watch_diff({"k": {"severity": "warning", "text": "t", "since": "s"}}, {"k": {"severity": "warning", "text": "t"}}, T0)
+        self.assertIs(taoq.watch_output("hotkey", {}, 2, T0, prev, ongoing_only, [])["alert"], False)
+        res = taoq.watch_diff({"k": {"severity": "warning", "text": "t", "since": "s"}}, {}, T0)
+        self.assertIs(taoq.watch_output("hotkey", {}, 2, T0, prev, res, [])["alert"], True)   # a cleared problem is told
+        self.assertIs(taoq.watch_output("hotkey", {}, 2, T0, None, quiet, [])["alert"], True)  # the first check always answers
+
+    def test_unusable_state_is_a_first_check(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "w.json")
+        for junk in ("{not json", "[]", '{"alerts":[],"at":1}', '{"alerts":{}}'):
+            with open(path, "w") as f:
+                f.write(junk)
+            self.assertIsNone(taoq.load_watch(path))
+
+
+class TestHotkeyWatch(unittest.TestCase):
+    """taoq hotkey --watch, end to end on variants of the recorded read, one watch after the other."""
+
+    def setUp(self):
+        self.run = Run()
+        self.t = T0
+        self.args = ("hotkey", VALI_HK, "--netuid", "70", "--watch")
+
+    def check(self, mutate=None, *extra):
+        self.t += H6
+        env = {"TAOQ_FIXTURE": variant(mutate)} if mutate else {}
+        return self.run.json(*self.args, *extra, now=self.t, env=env)
+
+    def test_the_sequence(self):
+        first = self.run.json(*self.args, now=T0)
+        self.assertEqual((first["watch"], first["first_check"], first["alert"]), (True, True, True))
+        self.assertEqual(first["registered_on"], [70])
+        self.assertNotIn("subnets", first)                      # no 30 kB metagraph dump in a watch
+        q = self.check()                                        # same chain: nothing to tell
+        self.assertEqual((q["alert"], q["new"], q["ongoing"], q["escalated"], q["resolved"]), (False, [], [], [], []))
+        code, out, _ = self.run(*self.args, "--text", now=self.t + 60)
+        self.assertEqual((code, out.strip()), (0, "NO_REPLY"))
+        s = self.check(validator_state(weights_age=2000))       # weights not set for 2000 blocks
+        self.assertIs(s["alert"], True)
+        self.assertEqual([(i["key"], i["severity"]) for i in s["new"]], [("weights_stale:SN70", "warning")])
+        self.assertEqual(s["new"][0]["data"]["blocks_since_weights"], 2000)
+        self.assertIn("2000 blocks", s["new"][0]["text"])
+        o = self.check(validator_state(weights_age=2500))       # still not set, more blocks: the same alert is not repeated
+        self.assertEqual((o["alert"], o["new"], o["escalated"], o["resolved"]), (False, [], [], []))
+        self.assertEqual(len(o["ongoing"]), 1)
+        self.assertTrue(o["ongoing"][0].startswith("weights_stale:SN70 warning since "))
+        code, out, _ = self.run(*self.args, "--text", now=self.t + 60, env={"TAOQ_FIXTURE": variant(validator_state(weights_age=2600))})
+        self.assertEqual(out.strip(), "NO_REPLY")
+        # Emission to zero and one of the oldest registrations: the lowest emission goes first, ties to the oldest.
+        mg = raw()["reads"][MG70]
+        zero_regs = sorted(r for r, e, i in zip(mg["block_at_registration"], mg["emission"], range(len(mg["emission"]))) if e == 0)
+        high = self.check(validator_state(weights_age=2500, emission=0, reg=zero_regs[1] + 1))       # third from the bottom
+        self.assertEqual([(i["key"], i["severity"]) for i in high["new"]], [("deregistration:SN70", "warning")])
+        self.assertIn("deregistration risk high", high["new"][0]["text"])
+        self.assertEqual(len(high["ongoing"]), 1)               # the weights alert is not repeated
+        nxt = self.check(validator_state(weights_age=2500, emission=0, reg=zero_regs[0]))
+        self.assertEqual([(i["key"], i["was"], i["severity"]) for i in nxt["escalated"]], [("deregistration:SN70", "warning", "critical")])
+        self.assertEqual((nxt["new"], nxt["alert"]), ([], True))
+        code, out, _ = self.run(*self.args, "--text", now=self.t + 60,
+                                env={"TAOQ_FIXTURE": variant(validator_state(weights_age=2500, emission=0, reg=zero_regs[1]))})
+        # (better than before, high again: not an alert)
+        self.assertEqual(out.strip(), "NO_REPLY")
+        back = self.check()                                     # everything normal again
+        self.assertIs(back["alert"], True)
+        self.assertEqual(sorted(i["key"] for i in back["resolved"]), ["deregistration:SN70", "weights_stale:SN70"])
+        self.assertEqual((back["new"], back["ongoing"]), ([], []))
+        self.assertIs(self.check()["alert"], False)
+
+    def test_text_of_an_alert(self):
+        self.run.json(*self.args, now=T0)
+        self.t += H6
+        code, out, _ = self.run(*self.args, "--text", now=self.t, env={"TAOQ_FIXTURE": variant(validator_state(weights_age=2000))})
+        lines = out.strip().splitlines()
+        self.assertEqual(code, 0)
+        self.assertTrue(lines[0].startswith("Hotkey watch 5E2LP6"), lines[0])
+        self.assertIn("6.0 h since the last check", lines[0])
+        self.assertTrue(lines[1].startswith("NEW warning: SN70 uid 1: has a validator permit but last set weights 2000 blocks"), lines[1])
+        self.assertEqual(len(lines), 2)
+
+    def test_first_check_text_is_the_report_and_a_note(self):
+        code, out, _ = self.run(*self.args, "--text", now=T0)
+        self.assertIn("registered on 1 subnet(s)", out)
+        self.assertTrue(out.strip().endswith(taoq.WATCH_NOTE))
+
+    def test_lost_permit_and_lost_registration_stay_until_regained(self):
+        self.run.json(*self.args, now=T0)
+        lost = self.check(validator_state(permit=False))
+        self.assertEqual([(i["key"], i["severity"]) for i in lost["new"]], [("permit_lost:SN70", "warning")])
+        again = self.check(validator_state(permit=False))
+        self.assertEqual((again["alert"], len(again["ongoing"])), (False, 1))
+        back = self.check()
+        self.assertEqual([i["key"] for i in back["resolved"]], ["permit_lost:SN70"])
+        # Not registered any more.
+        gone = self.check(lambda reads: reads.__setitem__(UIDS70, [None]))
+        self.assertEqual([(i["key"], i["severity"]) for i in gone["new"]], [("registration_lost:SN70", "critical")])
+        self.assertEqual(gone["registered_on"], [])
+        still = self.check(lambda reads: reads.__setitem__(UIDS70, [None]))
+        self.assertEqual((still["alert"], len(still["ongoing"])), (False, 1))
+        back = self.check()
+        self.assertEqual([i["key"] for i in back["resolved"]], ["registration_lost:SN70"])
+
+    def test_no_save_leaves_the_last_check_alone(self):
+        self.run.json(*self.args, now=T0)
+        self.t += H6
+        self.run.json(*self.args, "--no-save", now=self.t, env={"TAOQ_FIXTURE": variant(validator_state(weights_age=2000))})
+        again = self.check(validator_state(weights_age=2000))   # still new: the --no-save run recorded nothing
+        self.assertEqual(len(again["new"]), 1)
+
+    def test_other_watches_do_not_share_state(self):
+        self.run.json(*self.args, now=T0)
+        other = self.run.json("hotkey", VALI_HK, "--netuid", "70", "--watch", "--no-save", now=T0)
+        self.assertEqual(other["first_check"], False)
+        self.assertEqual(sorted(f for f in os.listdir(self.run.dir) if f.startswith("watch-")),
+                         [f"watch-hotkey-{VALI_HK}-sn70.json"])
+
+    def test_without_watch_the_report_is_unchanged(self):
+        o = self.run.json("hotkey", VALI_HK, "--netuid", "70")
+        self.assertNotIn("watch", o)
+        self.assertEqual(o["flags"], [])
+
+
+class TestSubnetWatch(unittest.TestCase):
+    URL = "https://api.github.com/repos/fugal-ai/fugal-subnet/releases?per_page=3"
+
+    def setUp(self):
+        self.run = Run()
+        self.t = T0
+        self.args = ("subnet", "70", "--watch")
+        self.rel = os.path.join(self.run.dir, "releases.json")
+        self.set_releases(["v1.0.0"])
+
+    def set_releases(self, tags):
+        with open(self.rel, "w") as f:
+            json.dump({self.URL: [{"tag_name": t, "name": t, "published_at": "2026-11-20T10:00:00Z",
+                                   "html_url": f"https://github.com/fugal-ai/fugal-subnet/releases/tag/{t}", "draft": False, "prerelease": False}
+                                  for t in tags]}, f)
+
+    def price_x(self, factor):
+        def mutate(reads):
+            for p in reads[PRICES]:
+                if p["netuid"] == 70:
+                    p["price"] = int(Decimal(p["price"]) * Decimal(factor))
+        return mutate
+
+    def check(self, mutate=None, *extra):
+        self.t += H6
+        env = {"TAOQ_RELEASES_FIXTURE": self.rel}
+        if mutate:
+            env["TAOQ_FIXTURE"] = variant(mutate)
+        return self.run.json(*self.args, *extra, now=self.t, env=env)
+
+    def test_the_sequence(self):
+        first = self.run.json(*self.args, now=T0, env={"TAOQ_RELEASES_FIXTURE": self.rel})
+        self.assertEqual((first["first_check"], first["alert"], first["netuids"]), (True, True, [70]))
+        q = self.check()
+        self.assertEqual((q["alert"], q["new"], q["ongoing"]), (False, [], []))
+        code, out, _ = self.run(*self.args, "--text", now=self.t + 60, env={"TAOQ_RELEASES_FIXTURE": self.rel})
+        self.assertEqual(out.strip(), "NO_REPLY")
+        up = self.check(self.price_x("1.25"))
+        self.assertEqual([(i["key"], i["severity"]) for i in up["new"]], [("price_move:SN70", "warning")])
+        d = up["new"][0]["data"]
+        self.assertEqual((d["price_pct"], Decimal(str(d["price_before"]))), (25, Decimal("0.003493646")))   # exact, from the raw rao
+        self.assertEqual(Decimal(str(d["price_after"])), Decimal("0.004367057"))
+        self.assertIn("+25", up["new"][0]["text"])
+        flat = self.check(self.price_x("1.25"))                 # stays there: the move was told once
+        self.assertEqual((flat["alert"], flat["new"]), (False, []))
+        small = self.check(self.price_x("1.30"))                # +4 %: below the threshold
+        self.assertEqual(small["alert"], False)
+        down = self.check(self.price_x("0.5"))
+        self.assertEqual([i["key"] for i in down["new"]], ["price_move:SN70"])
+        self.assertLess(down["new"][0]["data"]["price_pct"], -50)
+        none = self.run.json(*self.args, "--price-alert", "80", now=self.t + 3 * H6, env={"TAOQ_RELEASES_FIXTURE": self.rel, "TAOQ_FIXTURE": variant(self.price_x("0.5"))})
+        self.assertFalse(none["alert"])
+
+    def test_releases(self):
+        self.run.json(*self.args, now=T0, env={"TAOQ_RELEASES_FIXTURE": self.rel})
+        self.set_releases(["v1.1.0", "v1.0.0"])
+        r = self.check()
+        self.assertEqual([(i["key"], i["severity"]) for i in r["new"]], [("release:SN70:v1.1.0", "info")])
+        self.assertIn("https://github.com/fugal-ai/fugal-subnet/releases/tag/v1.1.0", r["new"][0]["text"])
+        self.assertFalse(self.check()["alert"])                 # told once
+        code, out, _ = self.run(*self.args, "--text", now=self.t + H6 + 5, env={"TAOQ_RELEASES_FIXTURE": self.rel})
+        self.assertEqual(out.strip(), "NO_REPLY")
+
+    def test_releases_that_cannot_be_read_are_named_not_guessed(self):
+        self.run.json(*self.args, now=T0, env={"TAOQ_RELEASES_FIXTURE": self.rel})
+        self.t += H6
+        o = self.run.json(*self.args, now=self.t)               # fixture mode and no release answers: no network
+        self.assertEqual((o["alert"], o["unread"]), (False, ["releases of SN70"]))
+        self.set_releases(["v1.1.0", "v1.0.0"])                 # the next readable check still has its baseline
+        self.assertEqual([i["key"] for i in self.check()["new"]], ["release:SN70:v1.1.0"])
+
+    def test_a_replaced_subnet_is_critical(self):
+        self.run.json(*self.args, now=T0, env={"TAOQ_RELEASES_FIXTURE": self.rel})
+
+        def replaced(reads):
+            for d in reads[DYN]:
+                if d and d["netuid"] == 70:
+                    d["network_registered_at"] = BLOCK - 10
+        o = self.check(replaced)
+        self.assertEqual([(i["key"], i["severity"]) for i in o["new"]], [("subnet_replaced:SN70", "critical")])
+
+    def test_several_subnets_one_watch(self):
+        o = self.run.json("subnet", "70", "4", "--watch", now=T0)
+        self.assertEqual(o["netuids"], [70, 4])
+        self.assertTrue(os.path.exists(os.path.join(self.run.dir, "watch-subnet-4-70.json")))
+
+    def test_without_watch_the_report_is_unchanged(self):
+        o = self.run.json("subnet", "70")
+        self.assertNotIn("watch", o)
+        self.assertEqual(o["subnets"][0]["netuid"], 70)
 
 
 if __name__ == "__main__":
