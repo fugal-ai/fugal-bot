@@ -16,6 +16,16 @@ What it answers, by the person's last message (OpenClaw's own trailing
   mentions "code word" -> acknowledges a code word like PELICAN-42, or repeats
        the one from an earlier user message (so the test can tell that the
        conversation history survived a restart).
+  the first conversation (bot/seed/BOOTSTRAP.md in the system prompt; driven by
+  scripts/first-conversation.sh):
+       "Hi"                       -> the greeting, copied out of BOOTSTRAP.md
+       "... daily stake report ... <Area/City>" -> exec `taoq stake <address
+            from the workspace files> --text`; automations add (the daily
+            job); exec (notes, rm BOOTSTRAP.md); the report + one line
+       "Run the daily stake report now: job <id>" -> automations run (forced)
+       a job's own message "Run exactly: taoq ..." -> exec it; reply with its
+            output (BRAIN_TAOQ_ENV, e.g. a recorded fixture, goes in front of
+            every taoq command)
   anything else        -> one fixed sentence.
 
 Each request's log line also names the request-body fields that are not part
@@ -38,6 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 EXPECT_KEY = os.environ.get("BRAIN_EXPECT_KEY", "")
 DUMP = os.environ.get("BRAIN_DUMP", "") == "1"
+TAOQ_ENV = os.environ.get("BRAIN_TAOQ_ENV", "")
 STANDARD_FIELDS = {
     "model", "messages", "tools", "tool_choice", "stream", "stream_options", "max_tokens",
     "max_completion_tokens", "temperature", "top_p", "stop", "n", "user", "seed", "store",
@@ -63,9 +74,86 @@ def text_of(content):
     return ""
 
 
+def call_tool(tools, name, args, *aliases):
+    """A tool call by name; through dispatch_action when OpenClaw hides it behind Tool Search."""
+    for n in (name, *aliases):
+        if n in tools:
+            return ("tool", n, args)
+    if "dispatch_action" in tools:
+        return ("tool", "dispatch_action", {"id": name, "args": args})
+    return ("text", f"SCRIPTED-BRAIN: the {name} tool was not offered", None)
+
+
+def taoq_cmd(cmd):
+    """The command as the bot would run it; BRAIN_TAOQ_ENV (e.g. a recorded fixture) goes in front."""
+    return f"{TAOQ_ENV} {cmd}".strip()
+
+
+# The first conversation (bot/seed/BOOTSTRAP.md), as a model that follows it would
+# carry it. The greeting is copied out of the BOOTSTRAP.md that OpenClaw put in front
+# of the model, so the test sees exactly what a real model was given.
+GREETING = re.compile(r"(Hi, I'm .*?Or just tell me what you need\.)", re.S)
+ADDRESS = re.compile(r"address `(5[1-9A-HJ-NP-Za-km-z]{46,48})`")
+ZONE = re.compile(r"\b([A-Z][a-z]+/[A-Z][A-Za-z_]+)\b")
+JOB_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# OpenClaw may put a "[Mon 2026-11-23 09:01 UTC]" style stamp in front of a message.
+STAMP = re.compile(r"^\s*\[[^\]\n]{0,80}\]\s*")
+
+
+def first_conversation(ask, system, tools, results):
+    step = len(results)
+    ask = STAMP.sub("", ask)
+    # ... and may add its own "Runtime: ..." lines after the person's words.
+    said = ask.split("\n\nRuntime:")[0].strip()
+    if "BOOTSTRAP.md" in system and said.lower().rstrip("!.") in ("hi", "hello", "hey"):
+        g = GREETING.search(system)
+        return ("text", g.group(1) if g else "SCRIPTED-BRAIN: no greeting found in BOOTSTRAP.md", None)
+    if "daily stake report" in ask.lower() and ZONE.search(ask):
+        addr = ADDRESS.search(system)
+        if not addr:
+            return ("text", "SCRIPTED-BRAIN: no address in the workspace files", None)
+        addr, zone = addr.group(1), ZONE.search(ask).group(1)
+        report = f"taoq stake {addr} --text"
+        if step == 0:
+            return call_tool(tools, "exec", {"command": taoq_cmd(report)})
+        if step == 1:
+            message = (f"Run exactly: {report}. Reply with its output unchanged, then at most one plain sentence about any "
+                       "line starting with \"!\". If it fails twice, reply only: Daily stake report: the chain could not be read this morning.")
+            job = {"name": "Daily stake report", "schedule": {"kind": "cron", "expr": "0 8 * * *", "tz": zone},
+                   "sessionTarget": "isolated",
+                   "payload": {"kind": "agentTurn", "lightContext": True, "toolsAllow": ["exec"], "timeoutSeconds": 300,
+                               "message": message}}
+            return call_tool(tools, "automations", {"action": "add", "job": job}, "cron")
+        if step == 2:
+            jid = JOB_ID.search(text_of(results[1].get("content")))
+            jid = jid.group(0) if jid else "unknown"
+            cmd = (f"printf '%s\\n' '- Time zone: {zone}' '- Wants: daily stake report at 08:00' >> ~/workspace/USER.md && "
+                   f"printf '%s\\n' '# MEMORY.md' '- Job \"Daily stake report\" id {jid}, cron 0 8 * * * {zone}, command: {report}' "
+                   f">> ~/workspace/MEMORY.md && rm -f ~/workspace/BOOTSTRAP.md && echo retired")
+            return call_tool(tools, "exec", {"command": cmd})
+        first = text_of(results[0].get("content"))
+        return ("text", f"{first.strip()}\n\nScheduled: this report every day at 08:00 {zone}. "
+                        "Ask me to change or stop it.", None)
+    if ask.lower().startswith("run the daily stake report now"):
+        jid = JOB_ID.search(ask)
+        if step == 0 and jid:
+            return call_tool(tools, "automations", {"action": "run", "jobId": jid.group(0), "runMode": "force",
+                                                    "timeoutMs": 120000}, "cron")
+        return ("text", "SCRIPTED-BRAIN RUN-NOW: " + " | ".join(text_of(m.get("content"))[:300].replace("\n", " ") for m in results), None)
+    if "Run exactly: taoq " in ask:
+        # A scheduled run of a job made above: run the command once, report its output.
+        log(f"cron-run step={step}")
+        if step == 0:
+            cmd = ask[ask.index("Run exactly: taoq ") + len("Run exactly: "):].split(". ")[0]
+            return call_tool(tools, "exec", {"command": taoq_cmd(cmd)})
+        return ("text", text_of(results[0].get("content")).strip() or "SCRIPTED-BRAIN: empty tool output", None)
+    return None
+
+
 def plan(req):
     msgs = req.get("messages", [])
     tools = {t.get("function", {}).get("name") for t in req.get("tools", []) or []}
+    system = " ".join(text_of(m.get("content")) for m in msgs if m.get("role") in ("system", "developer"))
     # OpenClaw adds its own "runtime context" user message after the person's.
     said = [i for i, m in enumerate(msgs) if m.get("role") == "user"
             and not text_of(m.get("content")).startswith("OpenClaw runtime context")]
@@ -73,7 +161,10 @@ def plan(req):
     ask = text_of(msgs[last_user].get("content")) if last_user >= 0 else ""
     results = [m for m in msgs[last_user + 1:] if m.get("role") == "tool"]
     step = len(results)
-    log(f"step={step} tools_offered={len(tools)}")
+    log(f"step={step} tools_offered={len(tools)} ask={ask[:70]!r}")
+    first = first_conversation(ask, system, tools, results)
+    if first is not None:
+        return first
     if "computer" in ask.lower() or results:
         if step == 0 and "exec" in tools:
             return ("tool", "exec", {"command": STAMP_CMD})
@@ -141,7 +232,7 @@ class H(BaseHTTPRequestHandler):
             call = {"index": 0, "id": f"call_{now}_{a}", "type": "function",
                     "function": {"name": a, "arguments": json.dumps(b)}}
             msg, finish = {"role": "assistant", "content": None, "tool_calls": [call]}, "tool_calls"
-            log("->", a, json.dumps(b)[:120])
+            log("->", a, json.dumps(b)[:300])
         else:
             msg, finish = {"role": "assistant", "content": a}, "stop"
             log("-> text")

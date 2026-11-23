@@ -23,13 +23,21 @@ to whoever operates the bots and is not in this repository.
 
 Identity, first run and backups, known limits:
 
-- The first-conversation script (`bot/seed/BOOTSTRAP.md`) has only run
-  against the scripted test model, which ignores it. That OpenClaw v2026.11.6
-  keeps the file and puts it in front of the model as "Bootstrap Pending" is
-  checked; how a real model carries the conversation, sets up the schedule
-  and whether it deletes the file afterwards is not. The script names
-  `automations` as the scheduling tool, which is this OpenClaw version's
-  name for it.
+- The first conversation. The first real-model run (DeepSeek V4 Flash)
+  narrated its instructions, printed `<message>` tags, then spent the whole
+  daily allowance (30 calls) failing to read stake by hand. Now the image
+  has a read-only chain tool, `taoq` (`docs/TAOQ.md`), the house rules send
+  every chain question to it and cap tool calls, and `BOOTSTRAP.md` was
+  rewritten (greeting only, exact commands, the exact `automations` job, `rm`
+  of the file in the same turn). The scripted model carries the whole
+  conversation in `scripts/hosted-test.sh` / `scripts/smoke.sh`: a real
+  `taoq` read in the bot's shell, the job in OpenClaw's table, one forced run,
+  the file deleted. A real model has not run the new script yet: the
+  conversation to try and what success looks like are in `docs/TAOQ.md`.
+- A daily stake report costs 2 model calls (an isolated run with light
+  context and only `exec`). The 6-hourly subnet and hotkey watches cost 2
+  calls per run even when quiet (`NO_REPLY`); OpenClaw's trigger scripts
+  could run `taoq` with no model call and wake the model only on news.
 - `BOT_DISPLAY_NAME` renames the agent, not the product: the page title reads
   "<name> — OpenClaw" and OpenClaw's own wording and logo stay. A full
   rename needs a rebuilt Control UI.
@@ -60,7 +68,8 @@ Identity, first run and backups, known limits:
   1.06 GB compressed, 2.8 GB unpacked, in 53 layers. The image is now built
   as one layer without the Codex binary (`UPSTREAM.md`): 0.80 GB compressed,
   2.53 GB unpacked, 3 layers, measured on an ordinary Docker host. How much
-  time that saves in a room has not been measured. Further candidates, not
+  time that saves in a room has not been measured. The chain tool adds
+  32 MB unpacked, 8.7 MB compressed. Further candidates, not
   removed: `@trycua/cua-driver` (48 MB) and `/app/docs` (38 MB; the agent is
   told it can read them). The rest is Chromium (381 MB), the libraries it
   needs, and OpenClaw itself.
