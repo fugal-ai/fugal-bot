@@ -158,6 +158,33 @@ sys.exit(0 if ok else 1)' "${job:-{\}}"
     bash -c '[[ "$0" =~ ^20[0-9][0-9]- ]]' "$done_at"
   watch_conversation
   site_question
+  knowledge_question
+}
+
+# The Bittensor reference (PRIMER, GLOSSARY, SOURCES) is an on-demand skill: only
+# its name and one-line description are in every request; the files are read
+# when a question needs them. The scripted model follows the skills list and
+# SKILL.md, so this passes only if both are what a real model is given.
+knowledge_question() {
+  step "the Bittensor reference: not sent on ordinary turns, read for a \"how does ... work\" question"
+  local reply n0 n1 turn before listed sizes
+  before=$(brain_log | grep -a '\[brain\] request bytes=')
+  listed=$(grep -a -c 'skills_list_bytes=[1-9]' <<< "$before")
+  check "requests so far: $(grep -a -c . <<< "$before"), $listed of them with the skills list; none carried the reference text" \
+    bash -c '[ "$1" -gt 0 ] && ! grep -a -q "reference_text=yes" <<< "$0"' "$before" "$listed"
+  sizes=$(grep -a -o 'request bytes=[0-9]* system_chars=[0-9]* skills_list_bytes=[0-9]*' <<< "$before" | head -1)
+  echo "first request of the bot: $sizes"
+  n0=$(brain_log | grep -a -c '\[brain\] -> ')
+  reply=$(chat knowledge "How does staking work on Bittensor?")
+  n1=$(brain_log | grep -a -c '\[brain\] -> ')
+  turn=$(brain_log | grep -a '\[brain\] -> ' | tail -n "$((n1 - n0))")
+  echo "reply:"; printf '%s\n' "$reply" | sed 's/^/    /' | head -5
+  check "the answer comes from the primer's staking section" \
+    bash -c '[[ "$0" == *"## Staking"* && "$0" == *"Bittensor reference"* ]]' "$reply"
+  check "that turn: 3 model calls (read SKILL.md, read one primer section, reply): $((n1 - n0))" \
+    bash -c '[ "$1" = 3 ] && grep -a -q -- "-> exec .*cat .*/skills/bittensor/SKILL.md" <<< "$0" && grep -a -q -- "-> exec .*sed -n .*PRIMER.md" <<< "$0"' "$turn" "$((n1 - n0))"
+  check "the reference text reached the model only in that turn" \
+    bash -c '[ "$(brain_log | grep -a -c "reference_text=yes")" -ge 1 ]'
 }
 
 # A chain question that names a dashboard site. In production ("Open taostats.io and

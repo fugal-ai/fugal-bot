@@ -537,7 +537,7 @@ if [ "$SEED_TEST" = 1 ]; then
   step "first-run files after the restart"
   seedlog2=$(seedlog); echo "entrypoint: $seedlog2"
   check "the second start wrote none of them again" \
-    bash -c '[[ "$0" == "IDENTITY.md=kept, SOUL.md=kept, USER.md=kept, AGENTS.md=kept, BOOTSTRAP.md="* && "$0" != *written* ]]' "$seedlog2"
+    bash -c '[[ "$0" == "IDENTITY.md=current, SOUL.md=current, USER.md=current, AGENTS.md=current, BOOTSTRAP.md="* && "$0" != *written* && "$0" != *updated* ]]' "$seedlog2"
   check "and they are byte for byte what they were before the first conversation" test "$(seedfiles)" = "$SEED_SUMS0"
 fi
 

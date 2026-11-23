@@ -33,7 +33,16 @@ What it answers, by the person's last message (OpenClaw's own trailing
        a job's own message "Run exactly: taoq ..." -> exec it; reply with its
             output (BRAIN_TAOQ_ENV, e.g. a recorded fixture, goes in front of
             every taoq command)
+       "How does <topic> work ..." -> only if the `bittensor` skill is in the
+            prompt's <available_skills>: exec `cat` of its SKILL.md (at the
+            listed location), then the `sed` command SKILL.md gives for the
+            primer section, then that section as the reply
   anything else        -> one fixed sentence.
+
+Each request is logged with its size, the size of the prompt's skills list,
+and whether a piece of the Bittensor reference files (skill bodies, not the
+list) is in it ("request bytes=... skills_list_bytes=... reference_text=no"),
+so a test can tell that the reference is sent only when the agent reads it.
 
 Each request's log line also names the request-body fields that are not part
 of the standard chat-completions set ("extra_fields=..."), which is how the
@@ -114,6 +123,19 @@ SITE_ASK = re.compile(r"(?i)\bopen ([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b.*?\bsubnet (\
 WATCH_SCRIPT = re.compile(r'script: ("(?:[^"\\]|\\.)*")\}')
 
 
+SKILL_ENTRY = re.compile(r"<name>bittensor</name>\s*<description>[^<]*</description>\s*<location>([^<]+)</location>")
+PRIMER_SED = re.compile(r"sed -n '/\^## Staking/,/\^## /p' \{baseDir\}/PRIMER\.md")
+HOW = re.compile(r"(?i)^how does (\w+) work")
+# Phrases found only in the reference files (PRIMER.md, GLOSSARY.md), never in
+# the always-sent prompt: if one is in a request, the agent read that file.
+REFERENCE_MARKS = ("Balancer-style", "Activity cutoff")
+
+
+def skills_list(system):
+    a, b = system.find("<available_skills>"), system.find("</available_skills>")
+    return system[a:b + len("</available_skills>")] if a >= 0 and b > a else ""
+
+
 def first_conversation(ask, system, tools, results):
     step = len(results)
     ask = STAMP.sub("", ask)
@@ -179,6 +201,24 @@ def first_conversation(ask, system, tools, results):
             return call_tool(tools, "exec", {"command": taoq_cmd(f"taoq subnet {site.group(2)} --text")})
         return ("text", f"{text_of(results[0].get('content')).strip()}\n\nRead straight from the chain with taoq; "
                         f"{site.group(1)} blocks automated browsers.", None)
+    how = HOW.search(said)
+    if how:
+        # A "how does it work" question: the agent loads the reference skill
+        # listed in its prompt and reads one section, as SKILL.md says.
+        entry = SKILL_ENTRY.search(system)
+        if not entry:
+            return ("text", "SCRIPTED-BRAIN: no bittensor skill in the prompt's skills list", None)
+        location = entry.group(1).strip()
+        if step == 0:
+            return call_tool(tools, "exec", {"command": f"cat {location}"})
+        if step == 1:
+            skill = text_of(results[0].get("content"))
+            if not PRIMER_SED.search(skill):
+                return ("text", "SCRIPTED-BRAIN: SKILL.md does not say how to read a primer section", None)
+            base = location.rsplit("/", 1)[0]
+            return call_tool(tools, "exec", {"command": f"sed -n '/^## Staking/,/^## /p' {base}/PRIMER.md"})
+        section = text_of(results[1].get("content")).strip()
+        return ("text", f"{section[:900]}\n\n(From the Bittensor reference.)", None)
     if "Run exactly: taoq " in ask:
         # A scheduled run of a job made above: run the command once, report its output.
         log(f"cron-run step={step}")
@@ -263,6 +303,11 @@ class H(BaseHTTPRequestHandler):
         req = json.loads(raw)
         extra = {k: req[k] for k in sorted(req) if k not in STANDARD_FIELDS}
         log("extra_fields=" + (json.dumps(extra, separators=(",", ":"))[:400] if extra else "none"))
+        system = " ".join(text_of(m.get("content")) for m in req.get("messages", [])
+                          if m.get("role") in ("system", "developer"))
+        everything = raw.decode("utf-8", "replace")
+        log(f"request bytes={len(raw)} system_chars={len(system)} skills_list_bytes={len(skills_list(system).encode())} "
+            f"reference_text={'yes' if any(m in everything for m in REFERENCE_MARKS) else 'no'}")
         if DUMP:
             log("dump", raw.decode("utf-8", "replace"))
         kind, a, b = plan(req)

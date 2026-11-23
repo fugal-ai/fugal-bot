@@ -35,6 +35,11 @@
 #   BOT_IMAGE, MODELPROXY_IMAGE, GATE_IMAGE, PROXY_IMAGE, BRAIN_IMAGE   image
 #     names to build and run (defaults as in the compose files; the proxy is
 #     built from proxy/Dockerfile.nocap, as published)
+#   --no-build: nothing of the product is built; the four images are used as
+#     named (pulled if missing), e.g. the digests of an `images` workflow run:
+#       BOT_IMAGE=ghcr.io/fugal-ai/fugal-bot@sha256:... MODELPROXY_IMAGE=... \
+#       GATE_IMAGE=... PROXY_IMAGE=... scripts/hosted-test.sh --no-build
+#     Only the test-only scripted model is built, if it is not there yet.
 #   HOSTED_TEST_PROJECT (fugal-bot-hostedtest), HOSTED_TEST_PORT (18097)
 #   HOSTED_TEST_TAOQ=live (default: the first conversation reads finney, needs
 #     the network) | fixture (a recorded read; no network for the chain tool)
@@ -200,12 +205,10 @@ cp compose.yaml compose.cathedral.yaml compose.hosted.yaml "$APP/"
 GATE_PW=$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 43)     # throwaway
 BOT_ID=b$(head -c 256 /dev/urandom | base64 | tr -dc 'a-z2-7' | head -c 10)
 CANARY_KEY="sk-smoke-$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"    # stand-in model key
-# The age key pair. The identity goes where the restore reads it, readable by
-# uid 1000 only; the bot only ever gets the public key.
-RECIPIENT=$(docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER \
-  -v "$HT/restore:/k" --entrypoint sh "$BOT_IMG" -c \
-  'umask 077 && age-keygen -o /k/identity.txt 2>/dev/null && chown 1000:1000 /k/identity.txt && age-keygen -y /k/identity.txt')
-check "an age key pair for this bot was made (public key ${RECIPIENT:0:12}...)" bash -c '[[ "$0" =~ ^age1[0-9a-z]{58}$ ]]' "$RECIPIENT"
+# The age key pair is made with the bot image's own age-keygen, so only after
+# the images exist (built below, or pulled for --no-build); until then .env
+# holds a placeholder for the public key.
+RECIPIENT=age1-placeholder-replaced-once-the-images-exist
 ( umask 077; cat > "$APP/.env" <<EOF
 # ---- layout ----
 COMPOSE_FILE=compose.yaml:compose.cathedral.yaml:compose.hosted.yaml:$REPO/scripts/smoke.compose.yaml:$REPO/scripts/hosted-test.compose.yaml
@@ -265,7 +268,24 @@ if [ "$BUILD" = 1 ]; then
   wait_mem
   (cd "$REPO" && env -i "${CLEAN[@]}" docker compose -p "$PROJECT" --env-file "$APP/.env" -f compose.yaml -f compose.cathedral.yaml \
     -f compose.hosted.yaml -f scripts/smoke.compose.yaml -f scripts/hosted-test.compose.yaml build -q) || { echo "build failed"; exit 1; }
+else
+  # --no-build: the four images as published (e.g. BOT_IMAGE=ghcr.io/...@sha256:...
+  # from a CI run), pulled when missing. Only the test-only scripted model is
+  # built here, if it is not there yet (a small Python image).
+  for img in "$BOT_IMG" "$MODELPROXY_IMG" "$GATE_IMG" "$PROXY_IMG"; do
+    docker image inspect "$img" >/dev/null 2>&1 || docker pull -q "$img" >/dev/null || { echo "cannot pull $img"; exit 1; }
+  done
+  docker image inspect "$BRAIN_IMG" >/dev/null 2>&1 ||
+    docker build -q -t "$BRAIN_IMG" scripts/scripted-brain >/dev/null || { echo "cannot build the scripted model"; exit 1; }
 fi
+# The age key pair. The identity goes where the restore reads it, readable by
+# uid 1000 only; the bot only ever gets the public key.
+RECIPIENT=$(docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER \
+  -v "$HT/restore:/k" --entrypoint sh "$BOT_IMG" -c \
+  'umask 077 && age-keygen -o /k/identity.txt 2>/dev/null && chown 1000:1000 /k/identity.txt && age-keygen -y /k/identity.txt')
+check "an age key pair for this bot was made (public key ${RECIPIENT:0:12}...)" bash -c '[[ "$0" =~ ^age1[0-9a-z]{58}$ ]]' "$RECIPIENT"
+[[ "$RECIPIENT" =~ ^age1[0-9a-z]{58}$ ]] || { echo "no age key, stopping"; exit 1; }
+sed -i "s/^BACKUP_AGE_RECIPIENT=.*/BACKUP_AGE_RECIPIENT=$RECIPIENT/" "$APP/.env"
 
 # ---- what the three files say, before anything runs ----------------------------
 step "the three compose files with the profile \"hosted\" (docker compose config)"
@@ -335,6 +355,12 @@ SEED_LOG=$(seedlog); SEED_SUMS0=$(seedfiles)
 echo "entrypoint: $SEED_LOG"
 check "new data directory: all five starter files were seeded" \
   test "$SEED_LOG" = "IDENTITY.md=written, SOUL.md=written, USER.md=written, AGENTS.md=written, BOOTSTRAP.md=written"
+doctor_log() { dc logs bot 2>&1 | grep -a -o '\[fugal-bot\] openclaw doctor[^"]*' | tail -1; }
+doctor_mark() { dc exec -T bot sh -c 'cat /home/node/.openclaw/fugal-doctor.ok 2>/dev/null | md5sum; md5sum < /etc/fugal-bot/image-id' | cut -c1-12 | tr '\n' ' '; }
+IMAGE_ID=$(dc exec -T bot cat /etc/fugal-bot/image-id 2>/dev/null | tr '\n' ' ')
+echo "image id: $IMAGE_ID"; echo "gateway start: $(doctor_log)"
+check "new data directory: openclaw doctor skipped (nothing to repair), the directory marked as made by this image" \
+  bash -c '[[ "$0" == *"already run by this image"*"skipped"* ]] && m=($1) && [ -n "${m[0]}" ] && [ "${m[0]}" = "${m[1]}" ]' "$(doctor_log)" "$(doctor_mark)"
 layout=$(as_root 'cd /t/data && stat -c "%n %u:%g %a" home proxy modelproxy 2>&1' | tr '\n' ' ')
 check "DATA_DIR layout: $layout" test "$layout" = "home 1000:1000 700 proxy 1001:1001 700 modelproxy 1002:1002 700 "
 pages=$(dc exec -T bot node -e '
@@ -524,7 +550,7 @@ file2=$(dc exec -T bot cat /home/node/workspace/smoke-file.txt 2>&1)
 check "the file the agent's shell made is back: $file2" test -n "$file1" -a "$file1" = "$file2"
 seedlog2=$(seedlog); echo "entrypoint: $seedlog2"
 check "no starter file was written again (the first conversation does not come back)" \
-  bash -c '[[ "$0" == "IDENTITY.md=kept, SOUL.md=kept, USER.md=kept, AGENTS.md=kept, BOOTSTRAP.md="* && "$0" != *written* ]]' "$seedlog2"
+  bash -c '[[ "$0" == "IDENTITY.md=current, SOUL.md=current, USER.md=current, AGENTS.md=current, BOOTSTRAP.md="* && "$0" != *written* && "$0" != *updated* ]]' "$seedlog2"
 check "and they are byte for byte what they were before the first conversation" test "$(seedfiles)" = "$SEED_SUMS0"
 who=$(dc exec -T bot node -e '
 const c = JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json", "utf8"));
@@ -545,9 +571,26 @@ brain_log() { dc logs brain 2>&1; }
 jnum() { jget "$@"; }
 FC_NAME=$NAME FC_EMOJI=$EMOJI FC_WALLET=$WALLET FC_TAOQ_MODE=$TAOQ_MODE first_conversation
 
+# ---- an image upgrade: doctor runs once ------------------------------------------
+step "an image upgrade: openclaw doctor --fix runs at the first start of the new image, and only then"
+as_root 'printf "openclaw 2026.11.5\nrevision an-older-image\nfiles 0000000000000000\n" > /t/data/home/.openclaw/fugal-doctor.ok && chown 1000:1000 /t/data/home/.openclaw/fugal-doctor.ok'
+dc up -d --no-build --force-recreate bot 2>&1 | tail -1
+check "bot and proxy healthy after the doctor run" wait_healthy
+START3=$HEALTHY_S
+echo "gateway start: $(doctor_log)"
+check "doctor ran (the data directory was last checked by an older image) and the marker now names this image" \
+  bash -c '[[ "$0" == *"doctor --fix: first start of this image"* ]] && m=($1) && [ "${m[0]}" = "${m[1]}" ]' "$(dc logs bot 2>&1 | grep -a 'openclaw doctor' | head -1)" "$(doctor_mark)"
+reply=$(chat hosted-memory "What was the code word I asked you to remember? Answer with just the code word.")
+check "a chat round trip after the doctor run: ${reply:0:40}" bash -c '[[ "$0" == *OSPREY-77* ]]' "$reply"
+dc up -d --no-build --force-recreate bot 2>&1 | tail -1
+check "bot and proxy healthy (same image again)" wait_healthy
+START4=$HEALTHY_S
+echo "gateway start: $(doctor_log)"
+check "the next start of the same image skips doctor" bash -c '[[ "$0" == *"already run by this image"*"skipped"* ]]' "$(doctor_log)"
+
 echo
 echo "== numbers"
-echo "start to healthy: ${START1}s (new data directory), ${START2}s (restored)"
+echo "start to healthy: ${START1}s (new data directory), ${START2}s (restored), ${START3}s (image upgrade: doctor), ${START4}s (same image)"
 echo "hot backup:  $(jget "$HOT_JSON" bytes) bytes in $(jget "$HOT_JSON" seconds) s"
 echo "cold backup: $(jget "$COLD_JSON" bytes) bytes in $(jget "$COLD_JSON" seconds) s"
 echo "restore:     $(jget "$RESTORE_JSON" files) files in $(jget "$RESTORE_JSON" seconds) s"
