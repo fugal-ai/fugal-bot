@@ -46,6 +46,32 @@ fi
 DEFAULT_BIND=""
 [ -n "$LISTEN_HOST" ] && DEFAULT_BIND="default_bind ${LISTEN_HOST}"
 
+# ---- framing -------------------------------------------------------------------
+# GATE_SSO=on: the bot is shown in a frame on the page that signs the user in
+# (GATE_PARENT_ORIGIN; by default the origin of GATE_LOGIN_URL). Every reply
+# then says "only this host and that one origin may frame me": the agent's own
+# pages forbid all framing (X-Frame-Options: DENY and frame-ancestors 'none'),
+# so that header is removed and that directive rewritten, and a policy of our
+# own is added for replies that carry none (the desktop pages).
+# GATE_SSO off: nothing is added or changed here.
+FRAMING=""
+case "$(printf '%s' "${GATE_SSO:-}" | tr 'A-Z' 'a-z')" in
+  on)
+    PARENT="${GATE_PARENT_ORIGIN:-}"
+    [ -n "$PARENT" ] || PARENT=$(printf '%s' "${GATE_LOGIN_URL:-}" | sed -n -E 's|^([Hh][Tt][Tt][Pp][Ss]://[^/?#]+).*$|\1|p')
+    PARENT=$(printf '%s' "$PARENT" | tr 'A-Z' 'a-z' | sed -E 's|:443$||')
+    # Exactly one https origin: it is written into the Caddyfile below.
+    if ! printf '%s' "$PARENT" | grep -Eqx 'https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?'; then
+      echo "[proxy] GATE_SSO=on: GATE_PARENT_ORIGIN (or GATE_LOGIN_URL) must give an origin like https://example.com" >&2; exit 2
+    fi
+    FRAMING="-X-Frame-Options
+		+Content-Security-Policy \"frame-ancestors 'self' ${PARENT}\"
+		Content-Security-Policy \"frame-ancestors[^;]*\" \"frame-ancestors 'self' ${PARENT}\""
+    ;;
+  ""|off) ;;
+  *) echo "[proxy] GATE_SSO must be 'on' or 'off'; refusing to start" >&2; exit 2 ;;
+esac
+
 cat > /tmp/Caddyfile <<CADDY
 {
 	admin off
@@ -75,6 +101,7 @@ ${SITE} {
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
 		${HSTS}
+		${FRAMING}
 	}
 	log {
 		output stdout
