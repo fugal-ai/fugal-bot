@@ -153,13 +153,14 @@ step "allowance: the bot's daily allowance is used up"
 table 0.000001 '["tools"]' 100 >/dev/null
 reply=$(chat chain-memory "Hello, are you there?")
 echo "what the user is told: ${reply:0:300}"
-check "the bot says so, in the gateway's words" has "$reply" "used up its inference allowance for today"
+check "the bot says so, in the gateway's words" has "$reply" "free allowance for today is used up and it comes back at midnight UTC"
+check "and says what to do now" has "$reply" "add your own model key in Settings on the Fugal Bot page"
 
 step "cap across all bots"
 table 5 '["tools"]' 0.000001 >/dev/null
 reply=$(chat chain-memory "Hello, are you there?")
 echo "what the user is told: ${reply:0:300}"
-check "the bot says so, in the gateway's words" has "$reply" "shared by all bots is used up for today"
+check "the bot says so, in the gateway's words" has "$reply" "free allowance shared by all bots is used up for today"
 gu2=$(admin GET /admin/usage)
 echo "gateway refused since start: $(num "$gu2" rejected_since_start)"
 check "the three refusals cost three requests and no tokens" \

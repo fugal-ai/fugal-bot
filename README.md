@@ -102,9 +102,11 @@ Optional hard caps in `.env`: `BUDGET_TOKENS_PER_DAY`, `BUDGET_TOKENS_TOTAL`,
 a price table per model, optionally with a cached-input price as a third number), and `BUDGET_REQUESTS_PER_MINUTE`. Once a cap is
 reached the model proxy refuses further model calls, and instead of an answer
 the web chat shows "Your request couldn't be completed: LLM request rejected:
-This bot has used up its inference allowance for today and it renews at
-midnight UTC" (for a total cap: "... its whole inference allowance and the
-owner of the bot can raise it"). That lasts until the day ends (daily caps)
+The free allowance for today is used up and it comes back at midnight UTC To
+keep going now add your own model key in Settings on the Fugal Bot page" (for
+a total cap: "The free allowance for this bot is used up To keep going add your
+own model key in Settings on the Fugal Bot page"; the texts have no
+punctuation because the web chat escapes it). That lasts until the day ends (daily caps)
 or you raise the cap and run `docker compose up -d`; the next message is then
 answered at once. A cap is checked before each call, so the last call can
 overshoot it by its own size. If an endpoint reports no token usage, the

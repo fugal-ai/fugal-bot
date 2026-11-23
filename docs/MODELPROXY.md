@@ -60,12 +60,21 @@ More on each:
   said it.
 - **The 400 form** has neither problem, which is why it is the default.
   OpenClaw's web chat shows an error text with a backslash before every
-  punctuation mark, so the proxy's texts are written without punctuation:
-  "This bot has used up its inference allowance for today and it renews at
-  midnight UTC" (a daily cap), "This bot has used up its whole inference
-  allowance and the owner of the bot can raise it" (a total cap), "The
-  inference allowance shared by all bots is used up for today and it renews
-  at midnight UTC" (the gateway's cap across all bots).
+  punctuation mark, so the proxy's texts are written without punctuation, and
+  without digits (the reset is "midnight UTC", not 00:00). Each says that the
+  free allowance is used up, when it comes back, and what to do now (OpenClaw
+  adds "LLM request rejected: " in front; the user sees it after the rest):
+  - a daily cap (a bot's own, in room mode or in the gateway): "The free
+    allowance for today is used up and it comes back at midnight UTC To keep
+    going now add your own model key in Settings on the Fugal Bot page";
+  - a total cap (room mode): "The free allowance for this bot is used up To
+    keep going add your own model key in Settings on the Fugal Bot page" (it
+    does not come back by itself);
+  - the gateway's cap across all bots: "The free allowance shared by all bots
+    is used up for today and it comes back at midnight UTC To keep going now
+    add your own model key in Settings on the Fugal Bot page".
+  The Fugal Bot page is the hosted product's; a self-hosted room has no such
+  page, so a self-hoster raises the cap in `.env` instead.
 
 Not measured: what Telegram shows (no token was used), and other agent
 frameworks. If OpenClaw is upgraded, run `scripts/smoke.sh`: its last step

@@ -116,13 +116,18 @@ EXHAUSTED_REPLIES = ("429", "402", "400", "200")
 # compaction, which then stores the notice as the conversation summary. A 400
 # is shown to the user, costs one request, and the next call goes through.
 DEFAULT_EXHAUSTED_REPLY = "400"
-# What the user is told. Deliberately without any punctuation: OpenClaw's web
+# What the user is told (OpenClaw puts "LLM request rejected: " in front): the
+# free allowance is used up, when it comes back, and what to do now. Deliberately
+# without any punctuation: OpenClaw's web
 # chat shows an error text with a backslash before every punctuation mark.
 # And without words agent frameworks read as "retry soon" or as a billing
 # failure of the key (rate limit, quota, exceeded, credits, ...).
-USED_UP_TODAY = "This bot has used up its inference allowance for today and it renews at midnight UTC"
-USED_UP_TOTAL = "This bot has used up its whole inference allowance and the owner of the bot can raise it"
-USED_UP_PLATFORM = "The inference allowance shared by all bots is used up for today and it renews at midnight UTC"
+USED_UP_TODAY = ("The free allowance for today is used up and it comes back at midnight UTC "
+                 "To keep going now add your own model key in Settings on the Fugal Bot page")
+USED_UP_TOTAL = ("The free allowance for this bot is used up "
+                 "To keep going add your own model key in Settings on the Fugal Bot page")
+USED_UP_PLATFORM = ("The free allowance shared by all bots is used up for today and it comes back at midnight UTC "
+                    "To keep going now add your own model key in Settings on the Fugal Bot page")
 
 
 def log(msg):

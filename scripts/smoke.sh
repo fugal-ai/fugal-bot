@@ -612,11 +612,11 @@ fetch(process.env.MODEL_BASE_URL + "/chat/completions", { method: "POST",
   .then(async (r) => { const e = (await r.json()).error; console.log(r.status + " " + e.code + " | " + e.message); })
   .catch((e) => console.log("fetch failed: " + e.message));' 2>&1)
 echo "model proxy answered the agent container: $direct"
-check "OpenAI-style error: HTTP 400, code allowance_exhausted" bash -c '[[ "$0" == "400 allowance_exhausted | "*"used up its whole inference allowance"* ]]' "$direct"
+check "OpenAI-style error: HTTP 400, code allowance_exhausted" bash -c '[[ "$0" == "400 allowance_exhausted | "*"free allowance for this bot is used up"* ]]' "$direct"
 reply=$(chat smoke-memory "Hello, are you there?")
 echo "what the user is told: ${reply:0:400}"
 check "the bot tells the user why, in the model proxy's words, instead of answering" \
-  bash -c '[[ "$0" != *"scripted test model"* ]] && [[ "$0" == *"used up its whole inference allowance"* ]]' "$reply"
+  bash -c '[[ "$0" != *"scripted test model"* ]] && [[ "$0" == *"free allowance for this bot is used up"* && "$0" == *"add your own model key in Settings on the Fugal Bot page"* ]]' "$reply"
 u7=$(usage)
 check "refused requests were not counted as usage" test "$(num "$u7" total.total_tokens)" = "$(num "$u6" total.total_tokens)"
 check "each refused message cost one request, no retries (refused since start: $(num "$u7" rejected_since_start.budget))" \

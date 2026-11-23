@@ -1092,6 +1092,30 @@ class GatewayModels(GatewayBase):
         self.assertEqual(Upstream.seen, [])                # answered here: the upstream's list is not shown
 
 
+class ExhaustedTexts(unittest.TestCase):
+    """What the user reads (after OpenClaw's "LLM request rejected: ") once an allowance is used up."""
+
+    TEXTS = {"today": mp.USED_UP_TODAY, "total": mp.USED_UP_TOTAL, "platform": mp.USED_UP_PLATFORM}
+
+    def test_no_punctuation_and_no_digits(self):
+        for name, t in self.TEXTS.items():
+            self.assertRegex(t, r"\A[A-Za-z ]+\Z", name)   # the web chat backslash-escapes punctuation
+
+    def test_each_says_what_to_do_now(self):
+        for name, t in self.TEXTS.items():
+            self.assertIn("free allowance", t, name)
+            self.assertIn("used up", t, name)
+            self.assertIn("add your own model key in Settings on the Fugal Bot page", t, name)
+            self.assertNotRegex(t.lower(), r"quota|exceed|credit|rate limit|retry|billing", name)
+
+    def test_daily_texts_say_when_it_comes_back(self):
+        for name in ("today", "platform"):
+            self.assertIn("comes back at midnight UTC", self.TEXTS[name], name)
+        self.assertNotIn("comes back", self.TEXTS["total"])    # a total cap does not reset
+        self.assertIn("shared by all bots", self.TEXTS["platform"])
+        self.assertNotIn("shared by all bots", self.TEXTS["today"])
+
+
 class GatewayAllowance(GatewayBase):
     def test_tenant_daily_allowance_in_usd(self):
         self.assertEqual(self.ask()[0].status, 200)        # 0.0025 USD
