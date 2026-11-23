@@ -90,10 +90,12 @@ test("production case 1: a bot seeded by the previous image, files unedited -> u
   write(h, "AGENTS.md", render(PREV["AGENTS.md"], VARS));
   write(h, "BOOTSTRAP.md", render(PREV["BOOTSTRAP.md"], VARS));
   assert.notEqual(read(h, "AGENTS.md"), current("AGENTS.md"), "the template did change");
+  const bootstrapChanged = read(h, "BOOTSTRAP.md") !== current("BOOTSTRAP.md");
   const r = run(h);
   assert.equal(r["AGENTS.md"], "updated");
   assert.equal(read(h, "AGENTS.md"), current("AGENTS.md"));
-  assert.equal(r["BOOTSTRAP.md"], read(h, "BOOTSTRAP.md") === current("BOOTSTRAP.md") ? "current" : "updated");
+  assert.equal(r["BOOTSTRAP.md"], bootstrapChanged ? "updated" : "current");
+  assert.equal(read(h, "BOOTSTRAP.md"), current("BOOTSTRAP.md"));
   for (const n of ["IDENTITY.md", "SOUL.md", "USER.md"]) assert.equal(r[n], "current", n);
   assert.equal(state(h).files["AGENTS.md"].sha256, sha(current("AGENTS.md")));
 });

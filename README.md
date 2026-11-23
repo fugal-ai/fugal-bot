@@ -169,6 +169,12 @@ tells the agent to stop after a few fruitless steps and say what went wrong.
 
 ## Name, look and first conversation
 
+The suggestion buttons in an empty chat ("What can you do?", "Summarize my
+recent sessions", ...) are fixed strings in OpenClaw v2026.11.6's Control UI
+bundle (`dist/control-ui/assets`, one set per language); no setting changes
+them. `BOOTSTRAP.md` handles "What can you do?" as a first message: a short
+answer plus a one-line offer of the daily stake report.
+
 All optional; leave them unset and the bot behaves as before.
 
 - `BOT_DISPLAY_NAME`, `BOT_EMOJI`: the bot's name and emoji in the web chat

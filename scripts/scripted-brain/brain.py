@@ -18,6 +18,10 @@ What it answers, by the person's last message (OpenClaw's own trailing
        conversation history survived a restart).
   the first conversation (bot/seed/BOOTSTRAP.md in the system prompt; driven by
   scripts/first-conversation.sh):
+       "What can you do?" (first message, BOOTSTRAP.md has the first-question rule)
+                                  -> the greeting's list + one line offering the report
+       "What is the price of subnet N ..." (same) -> exec `taoq subnet N --text`, then
+                                  its output + the one-line offer
        "Hi"                       -> the greeting, copied out of BOOTSTRAP.md
        "... daily stake report ... <Area/City>" -> exec `taoq stake <address
             from the workspace files> --text`; automations add (the daily
@@ -146,6 +150,22 @@ def first_conversation(ask, system, tools, results):
     ask = STAMP.sub("", ask)
     # ... and may add its own "Runtime: ..." lines after the person's words.
     said = ask.split("\n\nRuntime:")[0].strip()
+    first_question = "BOOTSTRAP.md" in system and "A question or a task" in system
+    if first_question and said.lower().rstrip("?!. ") == "what can you do":
+        # BOOTSTRAP.md: answer briefly from the greeting's list, then one line offering the report.
+        g = GREETING.search(system)
+        if not g:
+            return ("text", "SCRIPTED-BRAIN: no greeting found in BOOTSTRAP.md", None)
+        lines = [l for l in g.group(1).splitlines() if l.startswith("- ")]
+        return ("text", "I'm your own always-on agent with my own computer and browser. I can:\n"
+                        "- send you a **daily stake report**\n" + "\n".join(lines) +
+                        "\n\nWant a daily stake report for the wallet you signed in with? Tell me your time zone.", None)
+    first_task = re.search(r"(?i)^what is the price of subnet (\d{1,3})", said)
+    if first_question and first_task:
+        if step == 0:
+            return call_tool(tools, "exec", {"command": taoq_cmd(f"taoq subnet {first_task.group(1)} --text")})
+        return ("text", f"{text_of(results[0].get('content')).strip()}\n\n"
+                        "Want a daily stake report for the wallet you signed in with? Tell me your time zone.", None)
     if "BOOTSTRAP.md" in system and said.lower().rstrip("!.") in ("hi", "hello", "hey"):
         g = GREETING.search(system)
         return ("text", g.group(1) if g else "SCRIPTED-BRAIN: no greeting found in BOOTSTRAP.md", None)

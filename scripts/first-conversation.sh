@@ -49,11 +49,33 @@ console.log((r && r.setup_completed_at) || "");
 JS
 }
 
+# The first message need not be "Hi": OpenClaw's own starter button sends
+# "What can you do?", and a user may start with a real task. Each of these, in
+# a session of its own while BOOTSTRAP.md is still there, must be answered
+# plainly, with no word about the instruction files, plus a one-line offer, and
+# must leave BOOTSTRAP.md in place.
+first_messages() {
+  step "first message is not a greeting (scripted model): \"What can you do?\" and a real task"
+  local reply n0 n1 ask sess calls
+  for pair in "fc-wcyd|What can you do?|1" "fc-task|What is the price of subnet 70 right now?|2"; do
+    IFS='|' read -r sess ask calls <<< "$pair"
+    n0=$(brain_log | grep -a -c '\[brain\] -> ')
+    reply=$(chat "$sess" "$ask")
+    n1=$(brain_log | grep -a -c '\[brain\] -> ')
+    echo "\"$ask\" ->"; printf '%s\n' "$reply" | sed 's/^/    /' | head -8
+    check "\"$ask\" as the first message: answered, the daily stake report offered in one line, no word about instruction files or reasoning" \
+      bash -c '[[ "$0" == *"daily stake report"* && "$0" != *SCRIPTED-BRAIN* ]] && ! grep -a -q -i -E "bootstrap|agents\.md|instruction|per my|I should" <<< "$0"' "$reply"
+    check "\"$ask\": $calls model call(s) ($((n1 - n0)))" test "$((n1 - n0))" = "$calls"
+  done
+  check "BOOTSTRAP.md is still there after those first messages" bot_sh 'test -s /home/node/workspace/BOOTSTRAP.md'
+}
+
 first_conversation() {
   step "first conversation (scripted model): greeting, a real chain read with taoq ($FC_TAOQ_MODE), a schedule, BOOTSTRAP.md retired"
   if [ "$FC_TAOQ_MODE" = fixture ]; then
     bot_sh 'cat > /tmp/taoq-fixture.json.gz' < bot/tools/fixtures/finney.json.gz
   fi
+  first_messages
   local boot reply want greeting u0 u1 u2 n0 n1 jobs job jid line
   boot=$(bot_sh 'cat /home/node/workspace/BOOTSTRAP.md')
   check "BOOTSTRAP.md is waiting in the workspace" test -n "$boot"
