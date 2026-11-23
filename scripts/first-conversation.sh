@@ -157,6 +157,25 @@ sys.exit(0 if ok else 1)' "${job:-{\}}"
   check "OpenClaw itself recorded the first run as complete once the file was gone (workspace_setup_state.setup_completed_at = ${done_at:-empty})" \
     bash -c '[[ "$0" =~ ^20[0-9][0-9]- ]]' "$done_at"
   watch_conversation
+  site_question
+}
+
+# A chain question that names a dashboard site. In production ("Open taostats.io and
+# tell me what it shows for subnet 70") the agent browsed: taostats.io shows automated
+# browsers a bot check, 16 model calls later the turn failed. AGENTS.md sends such
+# questions to taoq; the scripted model follows it only if AGENTS.md says so.
+site_question() {
+  step "a chain question that names a dashboard site (scripted model): answered with taoq, no browser"
+  local reply n0 n1 turn
+  n0=$(brain_log | grep -a -c '\[brain\] -> ')
+  reply=$(chat site-question "Open taostats.io and tell me what it shows for subnet 70")
+  n1=$(brain_log | grep -a -c '\[brain\] -> ')
+  turn=$(brain_log | grep -a '\[brain\] -> ' | tail -n "$((n1 - n0))")
+  echo "reply:"; printf '%s\n' "$reply" | sed 's/^/    /' | head -6
+  check "the answer is taoq's subnet report, read in the bot's shell" \
+    bash -c '[[ "$0" == *"SN70 Fugal"* && "$0" == *"TAO/α"* && "$0" == *"straight from the chain"* ]]' "$reply"
+  check "that turn: 2 model calls (taoq subnet 70, reply), no browser, no web fetch: $((n1 - n0))" \
+    bash -c '[ "$1" = 2 ] && grep -a -q -- "-> exec .*taoq subnet 70 --text" <<< "$0" && ! grep -a -q -E "browser|web_fetch" <<< "$0"' "$turn" "$((n1 - n0))"
 }
 
 # A hotkey watch: a script job (no model call per check). The script is the recipe

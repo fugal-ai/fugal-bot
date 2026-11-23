@@ -25,7 +25,8 @@
 # and a conversation from before the backup are back. Last, the first
 # conversation (scripts/first-conversation.sh): the greeting, a real `taoq`
 # chain read in the bot's shell, a schedule made with OpenClaw's automations
-# tool and run once, BOOTSTRAP.md retired.
+# tool and run once, BOOTSTRAP.md retired; a hotkey watch; a chain question
+# that names a dashboard site, answered with taoq instead of the browser.
 #
 # NOT run here: the "tunnel" service (a Cloudflare named tunnel needs a real
 # token). Its definition is only checked with `docker compose config`.
@@ -336,6 +337,11 @@ check "new data directory: all five starter files were seeded" \
   test "$SEED_LOG" = "IDENTITY.md=written, SOUL.md=written, USER.md=written, AGENTS.md=written, BOOTSTRAP.md=written"
 layout=$(as_root 'cd /t/data && stat -c "%n %u:%g %a" home proxy modelproxy 2>&1' | tr '\n' ' ')
 check "DATA_DIR layout: $layout" test "$layout" = "home 1000:1000 700 proxy 1001:1001 700 modelproxy 1002:1002 700 "
+pages=$(dc exec -T bot node -e '
+const c = JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json", "utf8"));
+console.log(JSON.stringify(((c.tools || {}).web || {}).fetch) + " " + JSON.stringify((c.browser || {}).snapshotDefaults));' 2>&1)
+check "page sizes: web_fetch 6,000 characters by default and 12,000 at most, compact browser snapshots ($pages)" \
+  test "$pages" = '{"maxChars":6000,"maxCharsCap":12000} {"mode":"efficient"}'
 
 # ---- sign-in -------------------------------------------------------------------
 step "sign-in: a one-time token posted as a form; no password"

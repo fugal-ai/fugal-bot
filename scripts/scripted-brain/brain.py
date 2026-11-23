@@ -28,6 +28,8 @@ What it answers, by the person's last message (OpenClaw's own trailing
             (a SCRIPT job: the script is copied out of the recipe in AGENTS.md,
             so the test runs the very text a real model is given); the reply
        "Run the hotkey watch now: job <id>" -> automations run (forced)
+       "Open <site> ... subnet <N>" -> exec `taoq subnet <N> --text` (only if
+            AGENTS.md sends such questions to taoq), then its output as the reply
        a job's own message "Run exactly: taoq ..." -> exec it; reply with its
             output (BRAIN_TAOQ_ENV, e.g. a recorded fixture, goes in front of
             every taoq command)
@@ -106,6 +108,8 @@ STAMP = re.compile(r"^\s*\[[^\]\n]{0,80}\]\s*")
 
 
 HOTKEY = re.compile(r"hotkey[^5]*?(5[1-9A-HJ-NP-Za-km-z]{46,48})")
+# "Open taostats.io and tell me what it shows for subnet 70"
+SITE_ASK = re.compile(r"(?i)\bopen ([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b.*?\bsubnet (\d{1,3})\b", re.S)
 # The script payload of the watch recipe in AGENTS.md: payload: {kind: "script", script: "<JSON string>"}
 WATCH_SCRIPT = re.compile(r'script: ("(?:[^"\\]|\\.)*")\}')
 
@@ -165,6 +169,16 @@ def first_conversation(ask, system, tools, results):
             return call_tool(tools, "automations", {"action": "run", "jobId": jid.group(0), "runMode": "force",
                                                     "timeoutMs": 120000}, "cron")
         return ("text", "SCRIPTED-BRAIN RUN-NOW: " + " | ".join(text_of(m.get("content"))[:300].replace("\n", " ") for m in results), None)
+    site = SITE_ASK.search(said)
+    if site:
+        # AGENTS.md: a chain question goes to taoq even when the user names a
+        # dashboard site (taostats.io blocks automated browsers).
+        if "taostats.io" not in system or "taoq" not in system:
+            return ("text", "SCRIPTED-BRAIN: AGENTS.md says nothing about sites like taostats.io", None)
+        if step == 0:
+            return call_tool(tools, "exec", {"command": taoq_cmd(f"taoq subnet {site.group(2)} --text")})
+        return ("text", f"{text_of(results[0].get('content')).strip()}\n\nRead straight from the chain with taoq; "
+                        f"{site.group(1)} blocks automated browsers.", None)
     if "Run exactly: taoq " in ask:
         # A scheduled run of a job made above: run the command once, report its output.
         log(f"cron-run step={step}")
