@@ -178,7 +178,10 @@ special-token markup (`｜DSML｜`, `<｜`, `</｜`, `｜>`, `tool▁call`,
 unescaping) or in the text of the answer; finish reason `length` with a tool
 call; a stream that carries a tool call and ends without `data: [DONE]` or
 without a finish reason; a stream that breaks off while held. Ordinary `<`,
-`|`, `>` and a lone `｜` in a command are not markup.
+`|`, `>` and a lone `｜` in a command are not markup. A tool call cut at the
+output cap (finish reason `length`) is counted and logged but passed on, not
+asked again: the same request writes the same long call and hits the same cap
+(seen in a room: three 4,096-token attempts of one file write).
 
 Also broken: **degenerate text in any string of the arguments** (a model
 that has started to loop or to produce garbage), kept narrow:

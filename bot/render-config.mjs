@@ -276,6 +276,13 @@ const managed = {
     // reading a page is the browser's `text` action (AGENTS.md says so, with
     // maxChars; OpenClaw has no setting for its default there).
     snapshotDefaults: { mode: "efficient" },
+    // The agent shows small web apps it writes by serving them on this
+    // container's loopback (AGENTS.md); portals need an ingress a hosted bot
+    // does not have. Only localhost is added: the rest of the private network
+    // stays blocked. (Without an explicit policy OpenClaw grants loopback only
+    // in some cases; in a room the browser refused 127.0.0.1.) The agent can
+    // reach these ports with its shell anyway, so this grants nothing new.
+    ssrfPolicy: { allowedHostnames: ["localhost", "127.0.0.1"] },
   },
 
   // The Control UI's built-in Desktop panel shows this container's screen:

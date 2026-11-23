@@ -1571,6 +1571,9 @@ class ToolCallChecks(unittest.TestCase):
         self.assertEqual(one(start, args('{"command": "ls"}')), "the stream ended without a finish reason")
         self.assertEqual(one(start, args('{"command": "ls"}'), chunk({}, "length")),
                          "a tool call cut off at the length limit")
+        # cut at the cap in the middle of the arguments: the cap is the reason (not retried), not the bad JSON
+        self.assertEqual(one(start, args('{"command": "cat > a.html <<EOF'), chunk({}, "length")),
+                         mp.LENGTH_CUT)
         self.assertEqual(one(start, args('["ls"]'), chunk({}, "tool_calls")), "tool-call arguments are not a JSON object")
         self.assertEqual(one(chunk({"tool_calls": [{"index": 0, "function": {"arguments": "{}"}}]}), chunk({}, "tool_calls")),
                          "a tool call without a name")
@@ -1586,7 +1589,7 @@ class ToolCallChecks(unittest.TestCase):
         for body, want in ((tool_json('{"command": "ls"}'), None),
                            (tool_json('{"command": "ls</｜DSML｜>"}'), "model markup in a tool call"),
                            (tool_json('{"command": "ls" HHHH'), "tool-call arguments are not valid JSON"),
-                           (tool_json('{"command": "l', finish="length"), "tool-call arguments are not valid JSON"),
+                           (tool_json('{"command": "l', finish="length"), mp.LENGTH_CUT),
                            (completion(), None)):
             check = mp.ToolCallCheck()
             check.message(json.loads(body))
@@ -1691,10 +1694,13 @@ class MalformedRetry(Base):
         total = self.usage()["total"]
         self.assertEqual((total["malformed_retried"], total["discarded_requests"]), (1, 1))
 
-    def test_length_cut_inside_a_tool_call_is_asked_again(self):
-        self.answers(sse(*GOOD_CALL[:2], chunk({}, "length"), USAGE_CHUNK), sse(*GOOD_CALL, USAGE_CHUNK))
-        self.assertEqual(self.ask()[1], sse(*GOOD_CALL, USAGE_CHUNK))
-        self.assertEqual(len(Upstream.seen), 2)
+    def test_length_cut_inside_a_tool_call_is_passed_on_not_asked_again(self):
+        cut = sse(*GOOD_CALL[:2], chunk({}, "length"), USAGE_CHUNK)
+        self.answers(cut, sse(*GOOD_CALL, USAGE_CHUNK))
+        self.assertEqual(self.ask()[1], cut)
+        self.assertEqual(len(Upstream.seen), 1)
+        total = self.usage()["total"]
+        self.assertEqual((total["malformed_detected"], total["malformed_retried"], total["malformed_forwarded"]), (1, 0, 1))
 
     def test_proxy_added_usage_option_is_still_hidden_after_a_retry(self):
         self.answers(fixture("bad-dsml-4.sse"), fixture("good-tool-call.sse"))

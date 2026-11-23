@@ -937,6 +937,11 @@ def retry_after(resp):
 # words), which a broken answer leaks into tool-call arguments, e.g.
 # `</\uff5cDSML\uff5c>` or `<\uff5ctool\u2581call\u2581begin\uff5c>`. Plain `<`, `|` and
 # `>` in a command never match.
+# A tool call that reached the output cap (finish_reason "length"). Counted and
+# logged like any broken answer, but NOT asked again: the same request writes
+# the same long call and hits the same cap (measured: three 4,096-token attempts
+# of one file write), so a retry only multiplies the cost.
+LENGTH_CUT = "a tool call cut off at the length limit"
 MARKUP = re.compile("\uff5cDSML\uff5c|<\uff5c|</\uff5c|\uff5c>|tool\u2581call|end\u2581of\u2581sentence")
 TEXT_KEYS = ("content", "reasoning_content", "reasoning")
 
@@ -1092,6 +1097,8 @@ class ToolCallCheck:
         """Why this answer's tool calls cannot be used, or None if they can."""
         if interrupted:
             return "the answer was cut off"
+        if self.calls and "length" in self.finish.values():
+            return LENGTH_CUT
         for name, args in self.calls.values():
             if not name.strip():
                 return "a tool call without a name"
@@ -1113,8 +1120,6 @@ class ToolCallCheck:
         if self.markup:
             return "model markup in the text"
         if self.calls:
-            if "length" in self.finish.values():
-                return "a tool call cut off at the length limit"
             if stream and not self.done:
                 return "the stream ended inside a tool call"
             if stream and not self.finish:
@@ -1597,7 +1602,7 @@ class Handler(BaseHTTPRequestHandler):
                     events["stalls"] += 1
                     log(f"{method} {rest}{who} -> the answer stalled (no byte for {cfg.stall_timeout:g}s)"
                         + (" after part of it had gone out; the stream was closed" if a.sent else ""))
-                if a.sent or not a.problem or len(bad) + 1 == attempts:
+                if a.sent or not a.problem or a.problem == LENGTH_CUT or len(bad) + 1 == attempts:
                     break
                 bad.append(a)
                 log(f"{method} {rest}{who} -> malformed answer ({a.problem}); asking again "
