@@ -158,9 +158,15 @@ for the image without it, measured on the same host).
 ## The first conversation and the daily report
 
 `bot/seed/BOOTSTRAP.md` is written so that the first reply is the approved
-greeting and nothing else, without tags, and says that the file is private.
-For each starter job it gives the exact `taoq` command, the `automations` job
-to create and the instruction to delete the file in the same turn.
+greeting and nothing else (no tool call either), without tags, and says that
+the file is private; it is deleted only in the turn that sets up what the user
+chose. For each starter job the "Schedules" section of `bot/seed/AGENTS.md`
+gives the exact `taoq` command and the `automations` job to create; it lives
+there, not in BOOTSTRAP.md, so that a watch asked for days later is made the
+same way. (A real-model run on 2026-11-23 with the recipes in BOOTSTRAP.md:
+the agent deleted the file while greeting, then made every later job up
+itself: a non-isolated daily job that answered NO_REPLY, trigger scripts
+every 15 minutes for the watches.)
 
 Schedules use OpenClaw's own scheduler (the agent tool `automations`, alias
 `cron`; jobs are stored in the `cron_jobs` table of
