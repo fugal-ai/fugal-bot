@@ -137,6 +137,12 @@ services:
       HOST_LABEL: ${HOST_LABEL:-}
       MODEL_LABEL: ${MODEL_LABEL:-}
       REPO_URL: ${REPO_URL:-}
+      # Hosted mode only (.env.example, "hosted mode"): sign-in by a one-time
+      # token from the page that frames the bot, instead of the password.
+      GATE_SSO: ${GATE_SSO:-}
+      GATE_BOT_ID: ${GATE_BOT_ID:-}
+      GATE_LOGIN_URL: ${GATE_LOGIN_URL:-}
+      GATE_PARENT_ORIGIN: ${GATE_PARENT_ORIGIN:-}
     networks: [gatenet]
     read_only: true
     mem_limit: 64m
@@ -166,6 +172,11 @@ services:
       ALLOW_PUBLIC_HTTP: ${ALLOW_PUBLIC_HTTP:-}
       TUNNEL_IP: ${TUNNEL_NET:-10.213.58}.10
       CONTROL_UI_ORIGIN: ${CONTROL_UI_ORIGIN:-https://bot.invalid}   # shared with the bot
+      # Hosted mode only: with GATE_SSO=on the proxy lets that one origin
+      # (and no other) show the bot in a frame.
+      GATE_SSO: ${GATE_SSO:-}
+      GATE_LOGIN_URL: ${GATE_LOGIN_URL:-}
+      GATE_PARENT_ORIGIN: ${GATE_PARENT_ORIGIN:-}
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8080}:8443"
     volumes:

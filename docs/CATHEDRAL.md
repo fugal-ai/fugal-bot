@@ -26,7 +26,8 @@ Cathedral's sandbox API (create, push-dir, push-env, up, logs, extend, down,
 delete). It is not part of this repository.
 `cathedral.py up` runs `docker compose --project-directory /workspace/app
 --profile tunnel up -d --wait` as a background command and prints the
-`trycloudflare.com` URL from the tunnel's log.
+`trycloudflare.com` URL from the tunnel's log. That `--wait` is a known
+weakness: see "Starting: never `up --wait`" below.
 
 ## 1. Prepare the env file (on your machine, never committed)
 
@@ -94,13 +95,25 @@ and in the room (working directory `/workspace/app`):
 
 ```
 docker compose --profile tunnel pull
-docker compose --profile tunnel up -d --no-build --wait
+docker compose --profile tunnel up -d --no-build
 ```
 
 `pull` fetches the published images even though the services also have a
 build section; `--no-build` guarantees nothing is built. Without
 `--no-build`, compose still builds nothing as long as the images are present.
 Nothing is published yet.
+
+**Starting: never `up --wait`.** In real rooms a start took between 276 and
+621 seconds, and when it takes more than about 6 minutes Docker reports the
+bot as `unhealthy` for a while before it turns `healthy` by itself (the
+image's health check allows a 300-second start period and then six tries).
+`up --wait` gives up at that first `unhealthy`. Run `up -d`, which returns at
+once, and then poll until the bot is healthy, with a long deadline (20
+minutes) and treating `unhealthy` as "not yet":
+
+```
+docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q bot)"
+```
 
 ## 3. Keep it alive
 
@@ -131,6 +144,93 @@ off-site backup.
 - `python3 cathedral.py down` stops the stack; `delete` ends the room. The
   data under `/workspace` stays.
 
+## Hosted mode: a fixed hostname and sign-in from a site's page
+
+`compose.hosted.yaml` is a third file on top of the two above, for a bot that
+a site runs for its owner: the bot gets a fixed hostname through a Cloudflare
+**named** tunnel, and the owner signs in on the site's page, which shows the
+bot in a frame. It is switched on by the profile `hosted`:
+
+```
+COMPOSE_FILE=compose.yaml:compose.cathedral.yaml:compose.hosted.yaml
+COMPOSE_PROFILES=hosted
+DATA_DIR=/workspace/fugal-bot-data
+BIND_ADDRESS=127.0.0.1
+PORT=8080
+PUBLIC_HOSTNAME=
+ACCESS_PASSWORD=<32+ random characters; nobody types it>
+GATE_SSO=on
+GATE_BOT_ID=<the bot's id: "b" and 10 characters of a-z, 2-7>
+GATE_LOGIN_URL=https://site.example/bot
+# GATE_PARENT_ORIGIN=https://site.example   (default: the origin of GATE_LOGIN_URL)
+SESSION_HOURS=24
+TUNNEL_TOKEN=<token of the named tunnel>
+BACKUP_AGE_RECIPIENT=<age public key>
+```
+
+plus the model and image settings as before. Then, in `/workspace/app`:
+
+```
+docker compose pull
+docker compose up -d --no-build
+```
+
+What the profile does:
+
+- **`tunnel`** runs `cloudflared tunnel --no-autoupdate --metrics
+  127.0.0.1:2000 run --protocol http2`. The token comes from the environment
+  variable `TUNNEL_TOKEN` only. The hostname and the target are set on
+  Cloudflare's side, in the tunnel's ingress rule: it must send the hostname
+  to `http://127.0.0.1:<PORT>`. The quick tunnel's helpers (`tunnel-guard`,
+  `tunnel-url`) do not start, there is no `TUNNEL_URL.txt`, and
+  `PUBLIC_HOSTNAME` stays empty (TLS ends at Cloudflare; the proxy listens
+  on loopback in plain HTTP). Do not add `--profile tunnel` to this set of
+  files. The `--metrics` flag matters: without it cloudflared's metrics port
+  listens on every interface (`[::]:20241`), not on loopback.
+- **While the room is down or starting**, Cloudflare answers for the hostname
+  with HTTP 530 and the bare text `error code: 1033`, and the gate's page
+  comes back minutes before the bot itself is healthy. Nothing in the room
+  can change that: the page that frames the bot has to cover the frame with
+  its own notice until the controller reports the bot as running. Start it
+  as described above (`up -d`, then poll; never `up --wait`). The tunnel
+  waits for the proxy only, so it is up while the bot is still starting.
+- **Sign-in** is by one-time token (`GATE_SSO=on`). The site's controller
+  keeps a copy of `ACCESS_PASSWORD` and mints, for a signed-in owner, a token
+  `v1.<bot_id>.<exp>.<jti>.<mac>` that lives 60 seconds and works once; the
+  site's page posts it as a form (fields `token` and `next`) into the frame,
+  to `https://<bot host>/_gate/sso`. The gate answers 303 to `next` with the
+  session cookie `__Host-pb_session`. The password form is switched off. A
+  frame without a session shows "Signing you in" and sends
+  `{type: "fugal-bot:auth-required"}` to the page around it (`postMessage`,
+  to `GATE_PARENT_ORIGIN` only), which then posts a fresh token; a failed
+  sign-in sends `{type: "fugal-bot:auth-failed"}` instead. The page signs the
+  frame out with `POST https://<bot host>/_gate/logout` (credentials
+  included). Only `GATE_PARENT_ORIGIN` may frame the bot. Details and limits:
+  `SECURITY-NOTES.md`, "Hosted mode".
+- **`backup`** is a one-shot that `up` never starts. It runs
+  `/opt/fugal-bot/backup.sh cold` from the bot image with `DATA_DIR/home`
+  mounted read-only, reads the upload address (a presigned URL) as one line
+  on standard input, and encrypts to `BACKUP_AGE_RECIPIENT`:
+
+  ```
+  docker compose stop bot
+  docker compose run --rm -T backup < url.txt
+  docker compose start bot
+  ```
+
+  It needs a bot image that contains `backup.sh`.
+
+Tested: the three files together with Compose 2.33.0 and dummy values
+(`docker compose config`; with the profile the services are `volume-init`,
+`bot`, `modelproxy`, `gate`, `proxy`, `tunnel`); cloudflared's flags and its
+metrics address without a network connection; the sign-in, the framing rules
+and the cookie in `scripts/smoke.sh`, in both layouts, behind a stand-in for
+the site and for Cloudflare. A named tunnel was run in a real room by hand with the
+same command minus `--metrics` (it connects under gVisor with `--protocol
+http2`; the token was not found on the metrics port). **Not run:** this
+overlay's `tunnel` service itself (it needs a real Cloudflare token), the
+`backup` service, and the sign-in in a real room.
+
 ## What differs from the default layout, and what is untested
 
 - All services share the room's network namespace. The gateway therefore
@@ -158,5 +258,4 @@ off-site backup.
   default layout.
 - Not yet confirmed in a real room: the bot image build under gVisor,
   `DATA_DIR` bind mounts on `/workspace` (Cathedral reports that they work for
-  data and SQLite), the cold-start time, Chromium under gVisor, and
-  `up --wait` with the two one-shot services (`volume-init`, `tunnel-guard`).
+  data and SQLite), the cold-start time, and Chromium under gVisor.
