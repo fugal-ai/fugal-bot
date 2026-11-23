@@ -199,6 +199,10 @@ const managed = {
       allowedOrigins: origins,
       communityInvite: false,
       automaticallyFetchFavicons: false,
+      // Live session status digests: on by default, and richer ones call the
+      // agent's utility model (the user's allowance). Off; the chat shows
+      // tool activity anyway.
+      sessionObserver: false,
     },
   },
 
