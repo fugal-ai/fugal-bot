@@ -18,6 +18,11 @@ What it answers, by the person's last message (OpenClaw's own trailing
        conversation history survived a restart).
   anything else        -> one fixed sentence.
 
+Each request's log line also names the request-body fields that are not part
+of the standard chat-completions set ("extra_fields=..."), which is how the
+smoke test sees that MODEL_EXTRA_BODY reached the model. With BRAIN_DUMP=1 it
+logs each whole request body as well (debugging only; off in the smoke test).
+
 Like a real endpoint it reports token usage: always on plain replies, on
 streams only when asked (stream_options.include_usage), as a last chunk with
 empty `choices`. With BRAIN_EXPECT_KEY set it refuses any other API key, which
@@ -32,6 +37,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 EXPECT_KEY = os.environ.get("BRAIN_EXPECT_KEY", "")
+DUMP = os.environ.get("BRAIN_DUMP", "") == "1"
+STANDARD_FIELDS = {
+    "model", "messages", "tools", "tool_choice", "stream", "stream_options", "max_tokens",
+    "max_completion_tokens", "temperature", "top_p", "stop", "n", "user", "seed", "store",
+    "presence_penalty", "frequency_penalty", "parallel_tool_calls", "response_format",
+}
 STAMP_CMD = (
     "echo \"created by the bot's shell at $(date -u +%FT%TZ) on $(hostname)\" "
     "> /home/node/workspace/smoke-file.txt && uname -sr && id -un && "
@@ -120,6 +131,10 @@ class H(BaseHTTPRequestHandler):
         if not self._key_ok():
             return
         req = json.loads(raw)
+        extra = {k: req[k] for k in sorted(req) if k not in STANDARD_FIELDS}
+        log("extra_fields=" + (json.dumps(extra, separators=(",", ":"))[:400] if extra else "none"))
+        if DUMP:
+            log("dump", raw.decode("utf-8", "replace"))
         kind, a, b = plan(req)
         cid, now = f"chatcmpl-{int(time.time()*1000)}", int(time.time())
         if kind == "tool":

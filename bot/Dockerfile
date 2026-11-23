@@ -31,11 +31,22 @@ RUN apt-get update \
 RUN rm -rf /app/skills/clawhub \
  && install -d -m 1777 /tmp/.X11-unix
 
+# Backups (backup.sh / restore.sh): age encrypts the archive to a public key,
+# curl moves it. Debian trixie packages like the ones above, under the same
+# not-yet-pinned apt note. curl is already in the upstream image; naming it
+# here keeps it if upstream drops it. A layer of its own, after the large
+# desktop layer, so that one stays cached.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends age curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && age --version && curl --version | head -1
+
 COPY --chown=root:root supervisord.conf /etc/fugal-bot/supervisord.conf
-COPY --chown=root:root entrypoint.sh render-config.mjs healthcheck.sh start-gateway.sh /opt/fugal-bot/
+COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs healthcheck.sh start-gateway.sh backup.sh restore.sh /opt/fugal-bot/
+COPY --chown=root:root seed/ /opt/fugal-bot/seed/
 COPY --chown=root:root openbox-autostart /etc/xdg/openbox/autostart
-RUN chmod 0755 /opt/fugal-bot/*.sh /etc/xdg/openbox/autostart \
- && chmod 0644 /opt/fugal-bot/render-config.mjs /etc/fugal-bot/supervisord.conf
+RUN chmod 0755 /opt/fugal-bot/*.sh /opt/fugal-bot/seed /etc/xdg/openbox/autostart \
+ && chmod 0644 /opt/fugal-bot/*.mjs /opt/fugal-bot/seed/* /etc/fugal-bot/supervisord.conf
 
 # Everything the bot owns lives under /home/node, which is the ONE persistent
 # volume (mounted by compose). Nothing secret is baked into this image.
@@ -74,7 +85,12 @@ USER node
 WORKDIR /home/node
 
 EXPOSE 18789 6080
-HEALTHCHECK --interval=10s --timeout=8s --start-period=300s --retries=6 \
+# A long start period: on a slow host (a sandbox room reading a freshly
+# unpacked image) a start has taken up to 621 s, and with the earlier 300 s
+# the container was reported "unhealthy" on its way to healthy. A check that
+# passes inside the period still marks it healthy at once, so a fast host
+# loses nothing.
+HEALTHCHECK --interval=10s --timeout=8s --start-period=900s --retries=6 \
   CMD ["/opt/fugal-bot/healthcheck.sh"]
 
 ENTRYPOINT ["tini", "-s", "--", "/opt/fugal-bot/entrypoint.sh"]

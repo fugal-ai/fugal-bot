@@ -64,6 +64,18 @@ services:
       CONTROL_UI_ORIGIN: ${CONTROL_UI_ORIGIN:-https://bot.invalid}   # shared with the proxy
       DESKTOP_GEOMETRY: ${DESKTOP_GEOMETRY:-1280x800}
       TZ: ${TZ:-UTC}
+      # ---- optional: identity, first run, model extras, backups (.env.example) ----
+      BOT_DISPLAY_NAME: ${BOT_DISPLAY_NAME:-}
+      BOT_EMOJI: ${BOT_EMOJI:-}
+      UI_ACCENT_COLOR: ${UI_ACCENT_COLOR:-}
+      SEED_WORKSPACE: ${SEED_WORKSPACE:-}
+      OWNER_WALLET_SS58: ${OWNER_WALLET_SS58:-}   # a public address, not a secret
+      MODEL_INPUT: ${MODEL_INPUT:-text}
+      MODEL_EXTRA_BODY: ${MODEL_EXTRA_BODY:-}
+      MODEL_STREAM_USAGE: ${MODELPROXY_STREAM_USAGE:-true}   # one switch for both
+      BACKGROUND_MODEL_USE: ${BACKGROUND_MODEL_USE:-}
+      TOOLS_DENY: ${TOOLS_DENY:-}
+      BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:-}   # an age PUBLIC key
     volumes:
       - type: volume
         source: botdata

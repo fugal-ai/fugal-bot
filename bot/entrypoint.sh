@@ -42,6 +42,14 @@ cat > /tmp/novnc-web/index.html <<HTML
 HTML
 unset vncpw target
 
+# Optional starter files for the agent's workspace (identity, house rules, the
+# first-conversation script). Must run before render-config.mjs: "no config
+# file yet" is how it knows the data directory is new. Existing files are
+# never overwritten.
+if [ "${SEED_WORKSPACE:-}" = "1" ]; then
+  node /opt/fugal-bot/seed-workspace.mjs
+fi
+
 node /opt/fugal-bot/render-config.mjs
 
 exec /usr/bin/supervisord -c /etc/fugal-bot/supervisord.conf

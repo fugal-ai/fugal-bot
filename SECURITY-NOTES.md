@@ -27,6 +27,8 @@ fetches or runs third-party code or calls home.
 | Control UI extras that fetch the internet | `controlUi.communityInvite: false`, `controlUi.automaticallyFetchFavicons: false` | same |
 | Gateway's own token/password auth | replaced by `trusted-proxy` mode: only our proxy, at one fixed address, may assert the user, and only as `owner` | same |
 | Telegram groups | `groupPolicy: "disabled"`; DMs need pairing approval or an allowlist | same |
+| Tools that cannot work here (paired devices, voice and meeting capture, publishing to GitHub, the plugin installer, self-written skills) | `tools.deny` (15 names; `TOOLS_DENY` changes the list) | same |
+| Background model calls, when `BACKGROUND_MODEL_USE=off` | `plugins.entries.memory-core.config.dreaming.enabled: false`; OpenClaw then removes its "Memory Dreaming Promotion" job | same |
 
 The config renderer runs at every start and forces these keys back, so a
 change made in the web UI or by the agent does not survive a restart. It is
@@ -348,11 +350,80 @@ namespace the agent shares.
 - **Background model use**: OpenClaw's memory plugin schedules a "dreaming"
   (memory consolidation) job; with a paid model this spends tokens without a
   user message. It goes through the model proxy like every other call, so it
-  is counted and a budget bounds it.
+  is counted and a budget bounds it. `BACKGROUND_MODEL_USE=off` switches it
+  off (it was the only job v2026.11.6 schedules by itself; the smoke test
+  checks that none is left). Schedules the user or the agent creates still
+  run and still spend.
+- **The house rules are instructions, not controls.** With `SEED_WORKSPACE=1`
+  the agent's `AGENTS.md` tells it to ask before sending messages to others,
+  posting, buying or deleting, and never to handle wallet secrets. A model
+  can ignore or be talked out of instructions. OpenClaw enforces approval
+  only for shell commands (`EXEC_MODE=ask`); it has no approval gate for what
+  the agent does in its browser.
 - **The Telegram token is still in the agent container** (its environment),
   readable by the agent. Only the model key has been moved out.
 
-## 4. What the sealed stage (TDX VM with dstack) needs from this package
+## 4. Backups: what one contains, who holds the key
+
+`bot/backup.sh` (started by the operator; nothing in the bot starts it) makes
+one archive of the bot's home directory, encrypts it with age to the public
+key in `BACKUP_AGE_RECIPIENT`, and uploads it to a presigned URL.
+
+What a backup contains:
+
+- everything that makes the bot this bot: conversations, memory files, the
+  workspace, schedules, OpenClaw's config, pairing approvals;
+- the browser profile: **cookies and saved logins of every site the bot is
+  signed in to**, history, site storage;
+- anything the agent or the user saved in the home directory, which can
+  include secrets someone pasted into a chat or a file.
+
+What it does not contain: the model API key or the per-bot gateway token
+(they are in the model proxy's environment), the access password, the
+Telegram token, the tunnel token (all environment only), the model proxy's
+usage counters, the proxy's TLS state, browser and package caches, logs, and
+the VNC password.
+
+Who can read one:
+
+- Only the holder of the age **private** key. The bot is given the public key
+  and nothing else, so neither the agent nor anyone who takes over the
+  container can decrypt a backup, old or new, and the storage provider sees
+  ciphertext and sizes only.
+- In a hosted setup the operator's controller creates one key pair per bot
+  and keeps the private key in its own key store, never in the room. That
+  protects backups from the storage provider and from the room's host; it
+  does not protect them from the operator, who holds the key. A self-hoster
+  holds their own key (`age-keygen`); losing it loses the backups.
+- For a restore the private key has to be in the room for one command
+  (`restore.sh <identity file>`). It is read by age only, never copied into
+  the data directory, and should sit somewhere that is wiped with the room.
+  While it is there, the room's host can read it, and with it every backup
+  of that bot. A restore on a host you do not trust exposes the history.
+
+What encryption to a public key does not give:
+
+- **No proof of origin.** Anyone who knows the public key can produce a file
+  that decrypts. A backup is the agent's own data directory, so it was
+  already whatever the agent made of it; `restore.sh` unpacks it inside the
+  data directory only, as the bot's unprivileged user, refuses member names
+  that leave it, and executes nothing from it. The SHA-256 that `backup.sh`
+  prints lets the operator check that the object in storage is the one that
+  was uploaded.
+- **The presigned URL is a secret for its lifetime.** It arrives on standard
+  input and is passed to curl in a private file, never on a command line and
+  never in output or error messages. During a hot backup the agent runs as
+  the same user in the same container, so a hijacked agent could in
+  principle read that file while the upload runs. The URL lets its holder
+  write one object (that bot's backup), nothing else; keep its lifetime
+  short. A cold backup has no agent running.
+- **A hot backup is not one instant.** OpenClaw snapshots each of its
+  databases consistently, but the config, the databases and the plain files
+  are captured one after another, and the browser's own databases are copied
+  as they are while the browser may be writing. A cold backup, taken with
+  the bot stopped, has neither limit.
+
+## 5. What the sealed stage (TDX VM with dstack) needs from this package
 
 The package already is one compose app, one data directory, one published
 port, secrets only from the environment, digest-pinned images. Still needed:

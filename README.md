@@ -49,10 +49,11 @@ API. Create a key at https://chutes.ai/app/settings/api-keys, then in `.env`:
 ```
 MODEL_BASE_URL=https://llm.chutes.ai/v1
 MODEL_API_KEY=<your Chutes key>
-MODEL_NAME=moonshotai/Kimi-K2.6-TEE
+MODEL_NAME=deepseek-ai/DeepSeek-V4-Flash-0731-TEE
 MODEL_SUPPORTS_TOOLS=true
-MODEL_CONTEXT_WINDOW=262144
-MODEL_MAX_TOKENS=8192
+MODEL_INPUT=text
+MODEL_CONTEXT_WINDOW=64000
+MODEL_MAX_TOKENS=4096
 ```
 
 and `docker compose up -d`. The current list, with prices and a
@@ -60,6 +61,18 @@ and `docker compose up -d`. The current list, with prices and a
 entry whose `supported_features` include `tools` should work. It is paid per
 token, and every agent turn sends the whole conversation plus OpenClaw's
 system prompt, so a turn can cost tens of thousands of input tokens.
+
+Three models were measured on 2026-11-22 with direct calls to Chutes (small
+samples, one evening; not yet through the whole bot):
+
+| Use | `MODEL_NAME` | Notes |
+|---|---|---|
+| Default | `deepseek-ai/DeepSeek-V4-Flash-0731-TEE` | Text only. By far the fastest (a tool call back in about 1.4 s); 21 of 22 tool calls right; does not think unless asked. |
+| If the default fails | `zai-org/GLM-5.1-TEE` | Text only. No tool failure seen; about twice the price per turn. Nothing switches to it automatically: change `MODEL_NAME`. |
+| When the bot must read images | `moonshotai/Kimi-K2.6-TEE` | `MODEL_INPUT=text,image`. Turn its thinking off with `MODEL_EXTRA_BODY={"chat_template_kwargs":{"enable_thinking":false}}`, or a tool call takes 5 to 40 s instead of about 2 s. |
+
+The two text-only models answer HTTP 400 to a request with an image in it, so
+keep `MODEL_INPUT=text` for them.
 
 Any other OpenAI-compatible endpoint works the same way: change the `MODEL_*`
 lines and restart. For example Engy (`https://api.engy.ai/v1`), gm
@@ -103,6 +116,68 @@ after the cap is raised. The measurements, the other forms
 (`MODELPROXY_EXHAUSTED_REPLY`) and the proxy's second role, a central gateway
 for many bots with per-bot tokens and allowances, are in `docs/MODELPROXY.md`.
 
+## Model settings: speed and cost
+
+Set in `.env`, applied by `bot/render-config.mjs` at every start:
+
+- `MODEL_INPUT` (`text`, or `text,image`): what the model accepts.
+- `MODEL_EXTRA_BODY`: JSON fields added to every model request, for example
+  the switch that turns a model's "thinking" off. OpenClaw sends them itself
+  (`params.extra_body`), so nothing else has to rewrite requests.
+- `BACKGROUND_MODEL_USE=off`: no model calls without a message from you. It
+  switches off OpenClaw's nightly memory consolidation ("dreaming"), the one
+  job this version schedules by itself. Schedules you set up still run.
+- `TOOLS_DENY`: tools left out of what is sent to the model. By default the 15
+  that cannot work in this package (paired devices, voice and meeting capture,
+  publishing to GitHub, plugin installs, self-written skills).
+
+Always on: OpenClaw is told the endpoint reports token usage on streamed
+replies (so it knows how full the context is), and the browser tool returns
+its compact page snapshot unless the agent asks for more. Measured with the
+test model on OpenClaw v2026.11.6: the first request of a new bot shrank from
+69,700 to 47,400 bytes with the tool list trimmed and the shorter starter
+files below (about 5,600 fewer input tokens on every call at four characters
+a token).
+
+Not set, because it could not be tested without paid calls: prompt-cache keys
+(`compat.supportsPromptCacheKey`) and a separate image model
+(`agents.defaults.imageModel`).
+
+## Name, look and first conversation
+
+All optional; leave them unset and the bot behaves as before.
+
+- `BOT_DISPLAY_NAME`, `BOT_EMOJI`: the bot's name and emoji in the web chat
+  (page title, heading, message box). They are defaults: a name you change
+  later on the Agents page is kept.
+- `UI_ACCENT_COLOR` (`#rrggbb`): the accent colour of the web chat. A colour
+  you pick under Settings, Appearance wins over it.
+- `SEED_WORKSPACE=1`: at start, starter files are written into the agent's
+  workspace where they are missing. A file that exists is never overwritten.
+  - `IDENTITY.md`, `SOUL.md`, `USER.md`: the name and emoji, two lines on
+    tone, and what is known about the user (the public address below).
+  - `AGENTS.md`: house rules. Ask before sending a message to anyone else,
+    posting, buying, deleting or anything that cannot be undone; never ask
+    for or store wallet secrets; spend few model calls (page text before
+    screenshots, batch work); say when the daily allowance is nearly used.
+  - `BOOTSTRAP.md`, in a brand-new data directory only: the first
+    conversation. The bot says who it is, that it will never ask for a seed
+    phrase or private key and only reads public chain data, and offers a
+    daily stake report, a subnet watch, a hotkey watch or a research brief.
+    It sets the chosen job up as a schedule, writes what it learned to its
+    memory files and deletes `BOOTSTRAP.md`, which ends the first run: the
+    file is not written again at later starts or after a restore.
+- `OWNER_WALLET_SS58`: the owner's public Bittensor address, written into
+  those files so the bot can report on it without asking. Public data.
+
+The templates are in `bot/seed/`. They are short on purpose: OpenClaw sends
+every one of these files to the model with every request, so each line costs
+input tokens for the life of the bot. The five together are 5.9 kB, against
+18.8 kB for the files OpenClaw writes by itself, and 3.0 kB against 11.3 kB
+once `BOOTSTRAP.md` is gone. These rules are instructions to a model,
+not controls: OpenClaw only enforces approval for shell commands
+(`EXEC_MODE=ask`), not for messages, posts or purchases made in the browser.
+
 ## Run it on a rented machine
 
 **With a public address and a DNS name** (any Linux server with Docker):
@@ -144,7 +219,9 @@ COMPOSE_FILE=compose.yaml:compose.datadir.yaml
 
 The stack runs under a plain `dockerd`, including Docker-in-Docker; it needs no
 systemd and no privileged containers. It is limited to about 2.8 GB of RAM
-(`BOT_MEM_LIMIT`, `BOT_CPUS`).
+(`BOT_MEM_LIMIT`, `BOT_CPUS`). The bot's container needs most of that when
+its browser is busy: in a sandbox room it used 1.65 GB idle and peaked at
+3.33 GB under a 4 GB limit, so give it 4 GB where you can.
 
 **Hosts where containers get no NAT** (for example Cathedral confidential
 sandboxes, where Docker runs with `--bridge=none --iptables=false`): add
@@ -231,8 +308,71 @@ are off.
   address.
 - Wipe everything: `docker compose down -v` (named volume), or delete
   `DATA_DIR`'s contents.
-- Back up: `docker run --rm -v fugal-bot_botdata:/v -v "$PWD":/out alpine tar czf /out/bot-backup.tgz -C /v .`
-  The archive holds the full conversation history and browser cookies.
+- Back up: see the next section.
+
+## Back up and restore
+
+`bot/backup.sh` makes one archive of the bot's home directory, encrypts it
+with [age](https://age-encryption.org) to the public key in
+`BACKUP_AGE_RECIPIENT`, and uploads it with one HTTP PUT to a presigned URL
+(S3, R2 or anything else that accepts one). Nothing runs on a timer: you, or
+the service that operates the bot, start each backup. The bot only ever holds
+the public key, so it can make backups and cannot read them.
+
+```bash
+age-keygen -o bot-backup.key          # keep this file somewhere else; it prints the public key
+# .env: BACKUP_AGE_RECIPIENT=age1...   then: docker compose up -d
+
+# while the bot runs ("hot"): the URL goes in on standard input
+echo "$PRESIGNED_PUT_URL" | docker compose exec -T bot /opt/fugal-bot/backup.sh hot
+# with the bot stopped ("cold")
+docker compose stop bot
+echo "$PRESIGNED_PUT_URL" | docker compose run --rm --no-deps -T --entrypoint /opt/fugal-bot/backup.sh bot cold
+```
+
+It prints one line of JSON, for example
+`{"ok":true,"kind":"hot","format":1,"bytes":467817,"sha256":"64b7...","seconds":13.368,"openclaw":"2026.11.6"}`
+(size and SHA-256 of the encrypted object), or `{"ok":false,"error":"..."}`
+and a non-zero exit status. The URL is never printed or put on a command
+line.
+
+- **Hot** uses OpenClaw's own export (`openclaw backup create --verify`),
+  which snapshots its databases instead of copying them mid-write, for the
+  state directory and the workspace, and copies the rest of the home
+  directory as plain files. Checked on v2026.11.6 with the gateway running.
+  It needs about 0.3 GB of memory in the bot's container while it runs.
+- **Cold** is a plain tar of the home directory. It refuses to run while the
+  gateway answers.
+- **In a backup**: conversations, memory, the workspace, schedules, OpenClaw's
+  config, and the browser profile with its cookies and logins.
+- **Left out**: browser caches, `~/.cache`, `~/.npm`, OpenClaw's logs and
+  temporary files, the VNC password (made again at start). Never in one,
+  because they are outside the bot's home: the model proxy's usage counters
+  (`modelproxy/`; a restored bot counts from zero, which matters if you use
+  `BUDGET_TOKENS_TOTAL` or `BUDGET_USD_TOTAL`), the proxy's TLS state,
+  `TUNNEL_URL.txt`, and `.env`.
+
+Measured on new bots after a few conversations and one page visit (home
+directories of about 14 MB): 0.2 to 0.7 MB encrypted, 6 to 13 s hot (almost
+all of it OpenClaw's export, which took 34 s in a sandbox room), 0.15 s cold,
+0.2 to 0.4 s to restore. A bot with months of history was not measured.
+
+To restore, start from an empty data directory (a new volume, or `--force` to
+replace what is there), with the bot stopped:
+
+```bash
+docker compose up volume-init          # a new, empty volume
+echo "$PRESIGNED_GET_URL" | docker compose run --rm --no-deps -T \
+  -v "$PWD/bot-backup.key:/run/backup.key:ro" \
+  --entrypoint /opt/fugal-bot/restore.sh bot /run/backup.key
+docker compose up -d
+```
+
+The key file must be readable by uid 1000, the bot's user. `restore.sh`
+downloads, decrypts and checks the archive before it touches the
+data directory, then unpacks it and prints one line of JSON. At the next
+start the bot has its conversations and files back, and the first-run script
+does not run again. The key file is needed for that one command only.
 
 ## Smoke test
 
@@ -253,7 +393,14 @@ proxy: that its counters go up, that the model API key cannot be found in the
 agent container (environment, `/proc`, files, data directory), that it is not
 reachable from outside, and last that a very low budget makes it refuse, that
 the user is told why, and that the next message is answered once the budget
-is raised.
+is raised. With the scripted model it also gives the bot a name, an emoji, an
+accent colour and the starter files, and checks them: the files as seeded and
+untouched by OpenClaw after conversations and a restart, the name in the real
+web page, the extra request field on every model call, no background job
+scheduled. Last before the budget check, it takes an encrypted hot backup to
+a throwaway local object store, checks that the object cannot be read without
+the key, restores it into an empty volume, and takes and restores a cold
+backup there.
 
 By default the model is a test-only scripted one (`scripts/scripted-brain/`)
 placed behind the model proxy like a real endpoint, so the run needs no paid
@@ -273,7 +420,8 @@ compose.yaml           the bot: bot, modelproxy, gate, proxy, volume-init (+ tun
 compose.datadir.yaml   optional: data in a host directory (DATA_DIR)
 compose.cathedral.yaml optional: every service on the host network (hosts without container NAT)
 compose.hosted.yaml    optional, on top of the above: named tunnel, backup one-shot (profile "hosted")
-bot/                   OpenClaw image + desktop, browser, config renderer
+bot/                   OpenClaw image + desktop, browser, config renderer,
+                       starter files (seed/), backup.sh and restore.sh
 modelproxy/            holds the model key, meters tokens, enforces the budget; also the
                        central gateway for many bots (one program, Python stdlib)
 gate/                  password login with rate limiting, or sign-in by one-time token

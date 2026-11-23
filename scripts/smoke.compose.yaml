@@ -10,6 +10,7 @@ services:
     environment:
       # Set by smoke.sh to the stand-in API key; the brain then refuses any other.
       BRAIN_EXPECT_KEY: ${SMOKE_CANARY_KEY:-}
+      BRAIN_DUMP: ${BRAIN_DUMP:-}   # 1 = log whole request bodies (debugging)
     networks: [smokenet]
     read_only: true
     cap_drop: [ALL]

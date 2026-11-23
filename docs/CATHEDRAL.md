@@ -53,6 +53,19 @@ BOT_MEM_LIMIT=4g
 the agent (see "What differs" below for what that means in this layout).
 Optional `BUDGET_*` caps: `.env.example`.
 
+Optional, for a bot that should introduce itself and be backed up (all in
+`.env.example`; the model values there are the tested ones):
+
+```
+BOT_DISPLAY_NAME=<name>
+BOT_EMOJI=<one emoji>
+UI_ACCENT_COLOR=#2f6fed
+SEED_WORKSPACE=1
+OWNER_WALLET_SS58=<the owner's public address>
+BACKGROUND_MODEL_USE=off
+BACKUP_AGE_RECIPIENT=age1...        # the public key; the private key stays with you
+```
+
 `COMPOSE_FILE` makes a plain `docker compose ...` in the room use the overlay.
 Compose resolves `COMPOSE_FILE` from `.env` against the **working directory**,
 not `--project-directory`, so run compose with the working directory set to
@@ -133,9 +146,50 @@ python3 cathedral.py up --health-timeout 1200
 Conversations, memory, files and browser logins are kept (they are in
 `DATA_DIR`); the public URL changes; expect several minutes of downtime per
 cycle because the images are rebuilt. `/workspace` is best effort: keep an
-off-site backup.
+off-site backup (section 4).
 
-## 4. Logs and stopping
+## 4. Back up and restore in a room
+
+`/workspace` is best effort and a room is replaced every day, so take a
+backup before each replacement and keep it somewhere else. The scripts are in
+the bot image (`README.md`, "Back up and restore"; what a backup holds and
+who can read it: `SECURITY-NOTES.md`). Both read a presigned URL from
+standard input, so send it as the exec call's input, not inside the command:
+commands are kept in Cathedral's exec logs, input is not part of the command
+line. Working directory `/workspace/app`.
+
+```
+# while the bot runs (9 to 13 s on a new bot)
+docker compose exec -T bot /opt/fugal-bot/backup.sh hot           < the PUT URL
+
+# before deleting the room: stop the bot, then a cold backup
+docker compose stop bot
+docker compose run --rm --no-deps -T --entrypoint /opt/fugal-bot/backup.sh bot cold   < the PUT URL
+```
+
+Each prints one line of JSON with the size and SHA-256 of the encrypted
+object. To bring a bot back when `/workspace/fugal-bot-data/home` came back
+empty: put the age identity in a file outside `/workspace` (for example
+`/work/restore/identity.txt`; `/work` is wiped with the room), then, before
+starting the bot:
+
+```
+docker compose up volume-init
+docker compose run --rm --no-deps -T -v /work/restore/identity.txt:/run/backup.key:ro \
+    --entrypoint /opt/fugal-bot/restore.sh bot /run/backup.key    < the GET URL
+```
+
+and delete the identity file. The file must be readable by uid 1000, the
+bot's user. `restore.sh` refuses a data directory that already holds files
+unless it is given `--force`. While the identity is in the room, Cathedral's
+operator can read it.
+
+Not yet run in a real room: both scripts (they were tested on an ordinary
+Docker host and in the shared-loopback test layout), and scratch space: a hot
+backup writes about twice the data's size under `/tmp` inside the bot's
+container, which is on the room's own disk, not on `/workspace`.
+
+## 5. Logs and stopping
 
 - `python3 cathedral.py logs bot` (the client masks `.env` values inside the
   room before output leaves it). Do not run `docker compose config`, `env` or
@@ -230,6 +284,36 @@ same command minus `--metrics` (it connects under gVisor with `--protocol
 http2`; the token was not found on the metrics port). **Not run:** this
 overlay's `tunnel` service itself (it needs a real Cloudflare token), the
 `backup` service, and the sign-in in a real room.
+
+## Measured in rooms (2026-11-23, `sealed-4x8`, published images, test model)
+
+- **Start is slow.** From `up -d` to a healthy bot took 276 to 621 s, most of
+  it reading a freshly unpacked image; pulling and unpacking the bot image
+  took another 4 to 8 minutes. Whatever starts the bot must wait at least 15
+  minutes and must not treat a slow start as a failure. The image's health
+  check now allows 900 s before it counts failures (it was 300 s, and a
+  start that took longer was shown as `unhealthy` on its way to healthy).
+  Nothing was found that makes the start itself shorter: keeping Node's
+  compile cache on the data directory was tried locally and was slower
+  (73 to 78 s against 66 s), because the image already carries one.
+- **Memory.** The bot container used 1.65 GB idle, 2.3 to 3.0 GB with its
+  browser open and peaked at 3.33 GB during a browser check, against the 4 GB
+  limit (`BOT_MEM_LIMIT=4g`). Do not lower the limit, and do not turn on
+  anything that keeps a second browser or a large model in memory. A hot
+  backup runs OpenClaw's command-line program next to the gateway: about
+  0.3 GB more for the seconds it takes (323 MB measured locally), which
+  still fits under 4 GB at that peak, with little to spare.
+- **Desktop in a browser tab.** Through a Cloudflare tunnel an idle
+  `/desktop/` connection was closed after 125 s. The desktop bridge now sends
+  a websocket ping every 30 s (`websockify --heartbeat=30`), which kept an
+  idle session open in a room.
+- **Desktop panel in the web chat.** It failed in rooms with "gateway host
+  desktop is unavailable at 127.0.0.1:5900": the VNC server took 1.1 to 1.9 s
+  to greet a new connection and OpenClaw allows 1.5 s for the whole
+  handshake, with no setting for it. The VNC server now greets connections
+  from their own thread (`x11vnc -threads`). Locally that took the handshake
+  from 200-390 ms (400-890 ms with the container held to 0.3 CPU) to about
+  100 ms in both cases. **Not yet confirmed in a room.**
 
 ## What differs from the default layout, and what is untested
 
