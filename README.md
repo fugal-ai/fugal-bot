@@ -171,8 +171,9 @@ All optional; leave them unset and the bot behaves as before.
     daily stake report for the owner's wallet, then a subnet watch, a hotkey
     watch or research.
     For each job it runs `taoq` once and shows the result, sets the job up
-    as a schedule with OpenClaw's own scheduler (an isolated run that costs 2
-    model calls: one `taoq` run, one reply), writes what it learned to its
+    as a schedule with OpenClaw's own scheduler (a report: an isolated run that
+    costs 2 model calls; a watch: a script job with no model call that sends a
+    message only when something is new, worse or resolved), writes what it learned to its
     memory files and deletes `BOOTSTRAP.md`, which ends the first run: the
     file is not written again at later starts or after a restore.
 - `taoq` (in the image, on `PATH`): read-only Bittensor reports for those

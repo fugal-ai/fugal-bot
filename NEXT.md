@@ -35,9 +35,12 @@ Identity, first run and backups, known limits:
   the file deleted. A real model has not run the new script yet: the
   conversation to try and what success looks like are in `docs/TAOQ.md`.
 - A daily stake report costs 2 model calls (an isolated run with light
-  context and only `exec`). The 6-hourly subnet and hotkey watches cost 2
-  calls per run even when quiet (`NO_REPLY`); OpenClaw's trigger scripts
-  could run `taoq` with no model call and wake the model only on news.
+  context and only `exec`). The 6-hourly subnet and hotkey watches are
+  OpenClaw script jobs running `taoq ... --watch --text`: no model call per
+  check, and a message only when something is new, worse or resolved
+  (`docs/TAOQ.md`, "Watches"). OpenClaw 2026.11.6 fails the first script run
+  after each gateway start once ("Plugin runtime changed"); the scheduler's
+  own timer path has not been observed.
 - `BOT_DISPLAY_NAME` renames the agent, not the product: the page title reads
   "<name> — OpenClaw" and OpenClaw's own wording and logo stay. A full
   rename needs a rebuilt Control UI.
