@@ -64,11 +64,11 @@ RUN n=0; for d in /app/node_modules/.pnpm/@openai+codex@*-linux-*; do \
 # last stage does not know about. Build arguments of this stage show up in a
 # RUN step's environment too when a value is passed (the images workflow
 # passes GIT_REVISION and BUILD_DATE), so they are on the list of names that
-# are not upstream's, as are the tracing variables (OTEL_*, BUILDKIT_*) that the
+# are not upstream's, as are the tracing variables (OTEL_*, BUILDKIT_*, TRACEPARENT, TRACESTATE) that the
 # builder on a CI runner adds to every RUN step; anything else is printed
 # before the build stops.
 RUN env | grep -E '^(PATH|NODE_VERSION|YARN_VERSION|COREPACK_HOME|PLAYWRIGHT_BROWSERS_PATH|NODE_ENV)=' | sort > /etc/fugal-bot/upstream-env \
- && extra="$(env | cut -d= -f1 | grep -v -E '^(PATH|NODE_VERSION|YARN_VERSION|COREPACK_HOME|PLAYWRIGHT_BROWSERS_PATH|NODE_ENV|HOME|HOSTNAME|PWD|SHLVL|OLDPWD|_|GIT_REVISION|BUILD_DATE|SOURCE_DATE_EPOCH|DEBIAN_FRONTEND|OTEL_[A-Z0-9_]*|BUILDKIT_[A-Z0-9_]*)$' || true)" \
+ && extra="$(env | cut -d= -f1 | grep -v -E '^(PATH|NODE_VERSION|YARN_VERSION|COREPACK_HOME|PLAYWRIGHT_BROWSERS_PATH|NODE_ENV|HOME|HOSTNAME|PWD|SHLVL|OLDPWD|_|GIT_REVISION|BUILD_DATE|SOURCE_DATE_EPOCH|DEBIAN_FRONTEND|OTEL_[A-Z0-9_]*|BUILDKIT_[A-Z0-9_]*|TRACEPARENT|TRACESTATE)$' || true)" \
  && if [ -n "$extra" ]; then echo "unexpected environment variables in the upstream image: $extra" >&2; exit 1; fi
 
 # ---- the image -------------------------------------------------------------------
