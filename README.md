@@ -151,6 +151,12 @@ sandboxes, where Docker runs with `--bridge=none --iptables=false`): add
 `compose.cathedral.yaml`, which puts every service on the host network and
 wires them over `127.0.0.1`. Step-by-step: `docs/CATHEDRAL.md`.
 
+**Run for somebody else, inside a site's page** (hosted mode): a third file,
+`compose.hosted.yaml`, gives the bot a fixed hostname through a Cloudflare
+named tunnel and replaces the password by a one-time sign-in token that the
+site posts into a frame (`GATE_SSO=on`). A bot you run for yourself does not
+need it. `docs/CATHEDRAL.md`, "Hosted mode"; limits in `SECURITY-NOTES.md`.
+
 **First start takes a while**: building the bot image downloads the OpenClaw
 image (about 1 GB) and the desktop and Chromium packages, typically several
 minutes on a fresh machine; later starts reuse the image. To skip building,
@@ -236,7 +242,13 @@ the login gate, the web UI, a model reply, a shell command, file and browser
 page made by the agent, then drives the real web chat in headless Chromium
 (websocket origin checks, a message typed in the page and its reply, the
 desktop page connecting), then restarts and checks that the file, the
-conversation and the token counters are still there. It also checks the model
+conversation and the token counters are still there. In between it restarts
+the gate and the proxy once in hosted mode (`GATE_SSO=on`, a throwaway
+password) and repeats the chat and desktop checks the way a hosted bot is
+used: signed in by a one-time token, in a frame on the page of another origin
+of the same site, over HTTPS; it also checks who may frame the bot, what a
+sibling host can do with the cookie, and sign-out (`SMOKE_SSO=0` skips this
+part). It also checks the model
 proxy: that its counters go up, that the model API key cannot be found in the
 agent container (environment, `/proc`, files, data directory), that it is not
 reachable from outside, and last that a very low budget makes it refuse, that
@@ -248,8 +260,8 @@ placed behind the model proxy like a real endpoint, so the run needs no paid
 call, no real key and no local model. `SMOKE_BRAIN=configured` uses the model
 from `.env` instead (a hosted model costs money; the computer-use checks are
 skipped if that model cannot call tools). Secrets for a hosted model can be
-supplied with `SMOKE_SECRETS_FILE=<env file>`. The model proxy's own unit
-tests: `python3 -I modelproxy/test_modelproxy.py`.
+supplied with `SMOKE_SECRETS_FILE=<env file>`. Unit tests (stdlib only):
+`python3 -I modelproxy/test_modelproxy.py` and `python3 -I gate/test_gate.py`.
 `scripts/gateway-chain-test.sh` runs the hosted arrangement the same way:
 agent, the bot's model proxy, a second model proxy in gateway mode, the
 scripted model (`docs/MODELPROXY.md`).
@@ -260,10 +272,12 @@ scripted model (`docs/MODELPROXY.md`).
 compose.yaml           the bot: bot, modelproxy, gate, proxy, volume-init (+ tunnel profile)
 compose.datadir.yaml   optional: data in a host directory (DATA_DIR)
 compose.cathedral.yaml optional: every service on the host network (hosts without container NAT)
+compose.hosted.yaml    optional, on top of the above: named tunnel, backup one-shot (profile "hosted")
 bot/                   OpenClaw image + desktop, browser, config renderer
 modelproxy/            holds the model key, meters tokens, enforces the budget; also the
                        central gateway for many bots (one program, Python stdlib)
-gate/                  password login with rate limiting (Python stdlib)
+gate/                  password login with rate limiting, or sign-in by one-time token
+                       from a site's page (Python stdlib)
 proxy/                 Caddy: the one port, TLS, routes to chat and desktop
 scripts/               smoke test, gateway chain test and their test-only scripted model
 docs/                  CATHEDRAL.md (sandbox rooms), MODELPROXY.md (the model proxy's two roles)

@@ -181,6 +181,136 @@ OpenAI-compatible API. Failed logins: 5 per client address per 15 minutes, 50
 in total per 15 minutes. The browser `Origin` is checked at the proxy (must
 equal the address the browser is talking to) and again by the gateway.
 
+### Hosted mode: sign-in by one-time token (`GATE_SSO=on`)
+
+For a bot that a site runs for its owner and shows in a frame on its own page
+(`compose.hosted.yaml`). The self-hosted bot does not use it, and with
+`GATE_SSO` off the gate and the proxy behave as described above.
+
+**What changes**
+
+- There is no password login. `POST /_gate/login` answers 403 and the form is
+  not served. `ACCESS_PASSWORD` (the gate demands 32 or more characters) is
+  never typed: it is the secret from which the token key is derived, and the
+  site's controller holds a copy.
+- The site mints a token `v1.<bot_id>.<exp>.<jti>.<mac>` (HMAC-SHA256 under
+  SHA-256 of `fugal-bot-gate-sso-v1\0` + `ACCESS_PASSWORD`) and the site's
+  page posts it as a form into the frame, to `POST /_gate/sso`. The gate
+  checks the format, the mac (constant time), that the id is `GATE_BOT_ID`,
+  that it expires within the next 120 seconds (the minting side uses 60), and
+  that it was not used before. A token is good for this one bot only.
+- The post is accepted only when its `Origin` header is `GATE_PARENT_ORIGIN`,
+  or absent. Browsers always name the origin of a cross-origin form post, so
+  a request without the header comes from a program, not from a browser
+  somebody is being tricked in; such a client needs a valid token like anyone
+  else. `Origin: null` is refused, because any site can produce it. This
+  check is not what protects the bot (the token is): it stops another site
+  from signing a visitor's browser in to a bot that is not theirs.
+- The session cookie is `__Host-pb_session`: `Secure`, `HttpOnly`, `Path=/`,
+  no `Domain`, `SameSite=Strict`, lifetime `SESSION_HOURS`.
+- A browser without a session is not redirected. It gets a small page
+  (status 401, no inline script, policy `default-src 'none'; script-src
+  'self'`): inside a frame it sends `{type: "fugal-bot:auth-required"}` to
+  the page around it, addressed to `GATE_PARENT_ORIGIN` only, and that page
+  posts a new token; opened directly it goes to `GATE_LOGIN_URL`. Requests
+  that are not page loads, and websockets, get a plain 401.
+- `POST /_gate/logout` clears the cookie (from the site's page when the user
+  signs out there). It removes the cookie from that browser; it does not
+  cancel the session: a copy of the cookie stays valid until it expires or
+  `ACCESS_PASSWORD` changes. Open websockets stay open until the frame is
+  closed.
+- The proxy sends `Content-Security-Policy: frame-ancestors 'self'
+  <GATE_PARENT_ORIGIN>` on every reply, rewrites the agent's own
+  `frame-ancestors 'none'` to the same, and removes its `X-Frame-Options:
+  DENY`. So that one origin may frame the bot and no other can.
+
+**Replay and gate restarts.** The list of used tokens is in the gate's
+memory. A restart of the gate forgets it, so a token that was used just
+before the restart could be used a second time during the rest of its 60
+seconds. To close most of that, the gate refuses every token that expires
+less than 60 seconds after its own start, which is every token made before
+it started, as long as the two clocks agree. With a clock difference of `d`
+seconds, a token made in the last `d` seconds before the restart can still
+be replayed. Whoever replays one needs to have seen it: it travels in the
+body of an HTTPS request (never in an address), through Cloudflare and the
+room's loopback interface.
+
+**Failed attempts** are counted like failed logins (5 per address and 50 in
+total per 15 minutes; beyond that the answer is 429). Unlike the password
+form, a valid token is still accepted while the limit is reached. The mac is
+256 bits, so more attempts do not help a guesser, and this way nobody can
+lock the owner out by sending junk.
+
+**Why `__Host-`, and the same-site caveat.** Hosted bots live under the
+site's own domain (`b-<random>.<site domain>`). To a browser, the site, your
+bot and every other owner's bot are then the *same site*, although they are
+different origins. Consequences, and what is done about each:
+
+- *Cookies can be planted across sibling hosts.* Any host under the domain
+  may set a cookie with `Domain=<site domain>`, which the browser then sends
+  to every other host under it. A cookie whose name starts with `__Host-` is
+  only accepted when it was set by the exact host, over HTTPS, with `Path=/`
+  and without `Domain`. So another bot (or anything else under the domain)
+  cannot give your browser a session cookie for your bot, and yours is never
+  sent to them. In hosted mode the gate looks at `__Host-pb_session` and at
+  no other name.
+- *`SameSite` does not separate the bots.* `SameSite=Strict` keeps the cookie
+  off requests started by other sites, and it still works inside the frame
+  because the framing page is same-site (this is why `None` is not needed,
+  and it would be worse: sent from everywhere, and dropped by browsers that
+  block third-party cookies). But a page on another bot's host, or on the
+  site itself, is same-site, so the browser attaches your cookie to requests
+  that page makes to your bot. The gate therefore refuses, in hosted mode,
+  every request that carries the cookie but was started by another origin,
+  unless it is a plain page load (which is how the frame is opened): no API
+  call, no form post, no websocket. It decides by `Sec-Fetch-Site`, which
+  the browser sets and a page cannot forge, and by `Origin` for browsers
+  that do not send it. Framing by a sibling is stopped separately, by
+  `frame-ancestors`.
+- *What remains.* A page under the domain can still send a browser to your
+  bot (a page load, with your session). Scripts on your bot's own
+  origin, which the agent controls (it can publish pages there), run with
+  your session on that bot: that was always so. Such a script can also send
+  same-site requests to the site and to other bots with whatever cookies the
+  browser holds for them, so the site's own API must check `Origin` on
+  everything that changes state and use `__Host-` cookies too, and it must
+  check the origin and source of every message its page receives from the
+  frame. The token key is per bot, so nothing in one room opens another bot.
+
+**What a shell inside the bot can and cannot do to the gate (all-host-network
+layout).** There the gate listens on `127.0.0.1:9000` in the network
+namespace the agent shares.
+
+- It cannot read `ACCESS_PASSWORD` or the keys derived from it: they are in
+  the environment of the gate's and the proxy's containers (other mount and
+  process namespaces, other user ids, no capabilities, no Docker socket). So
+  it cannot mint tokens or session cookies, for this bot or any other.
+- It cannot see tokens or cookies in transit: it has no `CAP_NET_RAW`, and
+  the gate logs neither (not even the query string).
+- It can call the gate directly, with any `X-Gate-Client-IP` it likes. That
+  lets it use up the failed-attempt limit for any address. In hosted mode
+  this locks nobody out (see above); with the password gate it can.
+- It can ask the gate whether a cookie is valid, which gains it nothing: it
+  already reaches the gateway directly on loopback, with the owner's rights.
+- If the gate's process is ever down, the agent can bind `127.0.0.1:9000`
+  itself and answer the proxy in the gate's place. It would then receive the
+  tokens and cookies that browsers send, and could let anyone in. That gives
+  an attacker who already controls the agent nothing it did not have (the
+  bot's data and the agent's rights), and nothing outside this bot. The same
+  holds for the other loopback ports.
+- The tunnel's token is in the tunnel container's environment only, never on
+  a command line. cloudflared's metrics port is open to every local process,
+  the agent's shell included. It serves counters, readiness, the tunnel's
+  hostname, id and ingress rule, and Go profiling pages. In a real room the
+  token and its secret part were searched for in what 15 of those pages
+  return (metrics, config, the `/diag/` pages, variables, goroutine and heap
+  dumps): not found. That was one cloudflared version (2026.11.1), not an
+  audit of every page.
+- `compose.hosted.yaml` binds that port to loopback (`--metrics
+  127.0.0.1:2000`). This is needed: without the flag, cloudflared in a
+  container listens on **all** interfaces (`[::]:20241`), which on the host
+  network means every address the room has.
+
 ## 3. What is NOT protected yet
 
 - **The host sees everything**: the volume (conversations, memory, files,
@@ -206,6 +336,11 @@ equal the address the browser is talking to) and again by the gateway.
   model key. It can also spend the inference allowance, up to the budget.
 - **One shared password**, no accounts, no 2FA; the session cookie lasts 7
   days (`SESSION_HOURS`).
+- **Hosted mode trusts the site completely.** Whoever holds the bot's
+  `ACCESS_PASSWORD` (the site's controller) can mint a sign-in for it at any
+  time, and whoever controls the page at `GATE_PARENT_ORIGIN` can frame the
+  bot and act in it as the signed-in owner. The user's protection is the
+  site's own sign-in, not anything in this package.
 - **Supply chain**: images are pinned by digest, but the Debian packages added
   in `bot/Dockerfile` come from the live Debian mirror at build time (not
   pinned to a snapshot), and we use upstream's release image rather than our
