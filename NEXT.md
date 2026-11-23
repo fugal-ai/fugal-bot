@@ -55,15 +55,15 @@ Identity, first run and backups, known limits:
   with two viewers at once for 45 s without a crash and passes the smoke
   test in both layouts; it has not had hours of use.
 - Start time and image size (room measurements in `docs/CATHEDRAL.md`): a
-  start in a room takes 5 to 10 minutes and nothing here shortens it. The
-  bot image is 1.06 GB compressed and 2.8 GB unpacked. Largest parts that
-  this package does not use, as candidates for a smaller image:
-  `@openai/codex` (a native binary, 404 MB unpacked), `@trycua/cua-driver`
-  (48 MB), `/app/docs` (38 MB, though the agent is told it can read them).
-  Deleting them in a later layer would not help, because the upstream layers
-  are still pulled and unpacked; it needs our own build of the image from
-  selected files, and a test pass to see that OpenClaw starts without them.
-  The rest is Chromium (381 MB) and the libraries it needs.
+  start in a room takes 5 to 10 minutes and nothing here shortens it. Pulling
+  and unpacking the image took another 4 to 8 minutes there, with an image of
+  1.06 GB compressed, 2.8 GB unpacked, in 53 layers. The image is now built
+  as one layer without the Codex binary (`UPSTREAM.md`): 0.80 GB compressed,
+  2.53 GB unpacked, 3 layers, measured on an ordinary Docker host. How much
+  time that saves in a room has not been measured. Further candidates, not
+  removed: `@trycua/cua-driver` (48 MB) and `/app/docs` (38 MB; the agent is
+  told it can read them). The rest is Chromium (381 MB), the libraries it
+  needs, and OpenClaw itself.
 - OpenClaw keeps a "private update capture" of its databases at every start
   in `~/.openclaw.update-captures` (3 to 4 MB each in a room, 12 MB after
   four starts). Whether OpenClaw ever prunes it was not checked; if it does

@@ -4,16 +4,16 @@
 #
 # Upstream is NOT modified at source level. Everything we change lives in this
 # directory (see ../UPSTREAM.md and ../SECURITY-NOTES.md):
-#   - image layers below: extra apt packages, removal of the ClawHub skill,
-#     our entrypoint / supervisor / config renderer;
+#   - the build below: extra apt packages, removal of the ClawHub skill and
+#     of the Codex program's binary, our entrypoint / supervisor / config
+#     renderer; the result is copied into a fresh image as one layer;
 #   - runtime config written by render-config.mjs (marketplace, installs,
 #     updates and telemetry off; model + channels from the environment).
 
 # OpenClaw v2026.11.6, release commit 06afb10d3272cc9deaf38ca6a3b7b839d5935638,
 # multi-arch index digest (amd64 manifest sha256:ccb0d04f...). MIT licence.
 ARG OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw@sha256:65e229536a2698f0ab211c8a3d1c5c8e2685d19379d153e95f93ff76f22779cf
-FROM ${OPENCLAW_IMAGE}
-
+FROM ${OPENCLAW_IMAGE} AS prep
 
 USER root
 
@@ -48,6 +48,42 @@ COPY --chown=root:root openbox-autostart /etc/xdg/openbox/autostart
 RUN chmod 0755 /opt/fugal-bot/*.sh /opt/fugal-bot/seed /etc/xdg/openbox/autostart \
  && chmod 0644 /opt/fugal-bot/*.mjs /opt/fugal-bot/seed/* /etc/fugal-bot/supervisord.conf
 
+# Left out of the image: the Codex command-line program's binary (404 MB in
+# one platform package, linux-x64 or linux-arm64). It is the runtime behind
+# OpenClaw's "codex" agent harness for OpenAI subscription logins. This bot
+# reaches its model as an OpenAI-compatible endpoint through the model proxy
+# and never starts it. The harness's own code stays in place; using it would
+# fail with a missing-package error. The build stops if the package is not
+# where it is expected, so an upstream change here gets looked at.
+RUN n=0; for d in /app/node_modules/.pnpm/@openai+codex@*-linux-*; do \
+      if [ -d "$d" ]; then rm -rf "$d" && n=$((n + 1)); fi; \
+    done; test "$n" = 1
+
+# The upstream image's environment, written down for the check in the last
+# stage. The second line stops the build if upstream sets a variable that the
+# last stage does not know about.
+RUN env | grep -E '^(PATH|NODE_VERSION|YARN_VERSION|COREPACK_HOME|PLAYWRIGHT_BROWSERS_PATH|NODE_ENV)=' | sort > /etc/fugal-bot/upstream-env \
+ && test "$(env | grep -c -v -E '^(PATH|NODE_VERSION|YARN_VERSION|COREPACK_HOME|PLAYWRIGHT_BROWSERS_PATH|NODE_ENV|HOME|HOSTNAME|PWD|SHLVL|OLDPWD|_)=')" = 0
+
+# ---- the image -------------------------------------------------------------------
+# The prepared file system as ONE layer. Deleting a file in a later layer of
+# the same image only hides it: the layer below is still downloaded and
+# unpacked. Copied into a fresh image, what was deleted above is really gone,
+# and a host unpacks 3 layers instead of 55 (in a sandbox room unpacking the
+# image is most of the 5 to 8 minutes a pull takes, at every daily restart).
+# FROM scratch inherits nothing, so everything the upstream image set is set
+# again here: its environment (checked by the RUN below against the copy made
+# above), the user, the version label.
+FROM scratch
+COPY --from=prep / /
+ENV PATH=/home/node/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    NODE_VERSION=24.22.1 \
+    YARN_VERSION=1.22.22 \
+    COREPACK_HOME=/usr/local/share/corepack \
+    PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright \
+    NODE_ENV=production
+RUN env | grep -E '^(PATH|NODE_VERSION|YARN_VERSION|COREPACK_HOME|PLAYWRIGHT_BROWSERS_PATH|NODE_ENV)=' | sort | diff - /etc/fugal-bot/upstream-env
+
 # Everything the bot owns lives under /home/node, which is the ONE persistent
 # volume (mounted by compose). Nothing secret is baked into this image.
 ENV HOME=/home/node \
@@ -78,6 +114,7 @@ LABEL org.opencontainers.image.title="fugal-bot" \
       org.opencontainers.image.url="https://github.com/fugal-ai/fugal-bot" \
       org.opencontainers.image.documentation="https://github.com/fugal-ai/fugal-bot" \
       org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="2026.11.6" \
       org.opencontainers.image.base.name="ghcr.io/openclaw/openclaw:2026.11.6" \
       org.opencontainers.image.base.digest="sha256:65e229536a2698f0ab211c8a3d1c5c8e2685d19379d153e95f93ff76f22779cf"
 

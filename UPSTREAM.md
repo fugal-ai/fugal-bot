@@ -43,7 +43,24 @@ Image layers (`bot/Dockerfile`):
   `BOOTSTRAP.md`), which are ours, not copies of upstream's templates;
 - environment: `OPENCLAW_NO_AUTO_UPDATE=1`, `DO_NOT_TRACK=1`,
   `OPENCLAW_TELEMETRY_ENDPOINT` and `OPENCLAW_CLAWHUB_URL` pointed at an
-  unreachable local address, `OPENCLAW_DISABLE_BONJOUR=1`.
+  unreachable local address, `OPENCLAW_DISABLE_BONJOUR=1`;
+- left out the binary of the Codex command-line program
+  (`node_modules/.pnpm/@openai+codex@<version>-linux-<arch>`, 404 MB). It is
+  the runtime behind OpenClaw's `codex` agent harness, which signs in with an
+  OpenAI subscription. This package reaches its model as an OpenAI-compatible
+  endpoint through the model proxy and never starts it; the harness's own
+  code is untouched, and choosing it would fail with a missing-package error;
+- the image is one layer of files: a last build stage copies the prepared
+  file system into an empty image (`FROM scratch`, `COPY --from`), so the
+  deleted files are not shipped at all and a host unpacks 3 layers instead
+  of 55. Measured locally: 800 MB compressed instead of 1,058 MB, 2.53 GB
+  unpacked instead of 2.94 GB; apart from the Codex binary and one small
+  file of ours, every path, mode, owner and link is the same as before.
+  That stage sets again what the upstream image set (environment, user,
+  version label), and the build stops if upstream's environment differs from
+  the copy in `bot/Dockerfile`. The price: a new version of our image shares
+  no layer with the previous one or with upstream's, so an update downloads
+  all of it.
 
 Configuration written at every start (`bot/render-config.mjs`; full list and
 reasons in `SECURITY-NOTES.md`): all skill and plugin installs blocked, bundled
@@ -84,7 +101,11 @@ is reproducible by us, not only pinned.
 
 1. Read the release notes and the security advisories since `v2026.11.6`.
 2. `docker buildx imagetools inspect ghcr.io/openclaw/openclaw:<version>`; put
-   the new index digest in `bot/Dockerfile` and the commit in this file.
+   the new index digest in `bot/Dockerfile` and the commit in this file. In
+   the last stage of `bot/Dockerfile`, bring the copied environment
+   (`NODE_VERSION` and the others) and the version label up to date; the
+   build stops and shows the difference if the environment does not match,
+   or if the Codex package is no longer where it is removed.
 3. Start the bot and read `docker compose logs bot` for config errors; run
    `scripts/smoke.sh`.
 
