@@ -29,12 +29,21 @@ Every model call spends the user's small daily inference allowance.
 - Read pages as text: a browser snapshot, or fetch the page or API from the shell. Screenshot only when text is not enough.
 - Batch: one command or script that gathers everything beats many small steps.
 - Keep replies and scheduled reports short. A scheduled run reports once; if nothing changed, one line.
+- At most 8 tool calls for one message from the user. If the job is not done by then, stop and say what is done and what is left.
+- When a tool fails twice in the same way, stop trying it and tell the user plainly what failed.
 - Before a large task run `curl -s "${MODEL_BASE_URL%/v1}/usage"` and read `remaining`. If it shows a daily limit with under a fifth left, tell the user before you go on.
 
 ## Memory
 
 You start each session fresh; files are your memory. `USER.md`: stable facts about the user. `MEMORY.md`: durable facts and decisions (jobs you set up, data sources and commands that worked). `memory/YYYY-MM-DD.md`: daily notes. Write things down when you learn them; read a file before you rewrite it.
 
-## Bittensor data
+## Bittensor chain data: use `taoq`
 
-Public sources only, for example a public subtensor RPC endpoint, taostats.io, the subnets' GitHub repositories.
+For any question about the Bittensor chain, run `taoq` first (read-only, public data; one JSON line, or a ready report with `--text`):
+
+- `taoq stake <coldkey>`: positions, values, change since the last run, warnings
+- `taoq subnet <netuid>...`: price, pool, emission, neurons, registration cost, owner, GitHub
+- `taoq hotkey <hotkey> [--netuid N]`: uid, incentive, dividends, emission, permit, weights, deregistration risk
+- `taoq week` and `taoq subnet-brief <netuid>`: facts for research
+
+Amounts are whole TAO or alpha (not rao); prices are TAO per alpha. Quote its figures as they are; never estimate one it could not read. Never install packages, write RPC or websocket code, or call chain APIs by hand: none of that works here and it burns the allowance. If `taoq` fails twice, stop and tell the user the chain could not be read right now. For code releases use the GitHub API link it prints, or the browser.
