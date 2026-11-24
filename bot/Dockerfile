@@ -31,6 +31,15 @@ RUN apt-get update \
 RUN rm -rf /app/skills/clawhub \
  && install -d -m 1777 /tmp/.X11-unix
 
+# Checked patches of OpenClaw's built files: things that cannot work in a hosted
+# bot and that no config setting hides or rewords (the plugin marketplace's
+# error, the backup command hint, the automation default that never reached
+# the web chat, the microphone with no speech-to-text provider). Each is an
+# exact string that must occur exactly once, or the build stops here (see the
+# script). The script itself is not kept in the image.
+COPY --chown=root:root patch-openclaw.mjs /tmp/patch-openclaw.mjs
+RUN node /tmp/patch-openclaw.mjs /app && rm -f /tmp/patch-openclaw.mjs
+
 # Backups (backup.sh / restore.sh): age encrypts the archive to a public key,
 # curl moves it. Debian trixie packages like the ones above, under the same
 # not-yet-pinned apt note. curl is already in the upstream image; naming it
@@ -65,7 +74,7 @@ RUN pip_whl=/tmp/pip-26.3-py3-none-any.whl \
  && ! "$venv/bin/python3" -I -c 'import pip' 2>/dev/null
 
 COPY --chown=root:root supervisord.conf /etc/fugal-bot/supervisord.conf
-COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs seed-history.json healthcheck.sh start-gateway.sh backup.sh restore.sh /opt/fugal-bot/
+COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs owner-name.mjs seed-history.json healthcheck.sh start-gateway.sh backup.sh restore.sh /opt/fugal-bot/
 COPY --chown=root:root seed/ /opt/fugal-bot/seed/
 COPY --chown=root:root skills/ /opt/fugal-bot/skills/
 COPY --chown=root:root tools/taoq.py /opt/fugal-bot/tools/taoq.py
