@@ -406,6 +406,8 @@ check "the model proxy counted it (requests $(jget "$u0" total.requests) -> $(jg
 reply=$(chat hosted-tools "Use your computer: run a shell command that writes a file in your workspace, then open https://example.com in your browser.")
 echo "reply: ${reply:0:400}"
 check "the agent used its shell and its browser" bash -c '[[ "$0" == *SCRIPTED-BRAIN\ DONE* ]]' "$reply"
+check "the shell command ran (its file is in the reply, no tool error)" \
+  bash -c '[[ "$0" == *"created by the bot'"'"'s shell"* && "$0" != *'"'"'"status": "error"'"'"'* ]]' "$reply"
 blog=$(dc logs brain 2>&1)
 with=$(grep -a -c "extra_fields=$EXTRA_BODY" <<< "$blog"); without=$(grep -a -c 'extra_fields=none' <<< "$blog")
 check "every model request carried the MODEL_EXTRA_BODY field from .env ($with with it, $without without)" test "$with" -gt 0 -a "$without" = 0
@@ -550,7 +552,7 @@ check "a fresh token signs in (got $code)" test "$code" = 303
 check "the marker written before the backup is back: $(dc exec -T bot cat /home/node/workspace/hosted-marker.txt 2>&1)" \
   test "$(dc exec -T bot cat /home/node/workspace/hosted-marker.txt 2>/dev/null)" = "$MARK"
 file2=$(dc exec -T bot cat /home/node/workspace/smoke-file.txt 2>&1)
-check "the file the agent's shell made is back: $file2" test -n "$file1" -a "$file1" = "$file2"
+check "the file the agent's shell made is back: $file2" bash -c '[[ "$0" == *"created by the bot"* ]] && [ "$0" = "$1" ]' "$file1" "$file2"
 seedlog2=$(seedlog); echo "entrypoint: $seedlog2"
 check "no starter file was written again (the first conversation does not come back)" \
   bash -c '[[ "$0" == "IDENTITY.md=current, SOUL.md=current, USER.md=current, AGENTS.md=current, BOOTSTRAP.md="* && "$0" != *written* && "$0" != *updated* ]]' "$seedlog2"
@@ -573,6 +575,19 @@ bot_sh() { dc exec -T bot sh -c "$1"; }
 brain_log() { dc logs brain 2>&1; }
 jnum() { jget "$@"; }
 FC_NAME=$NAME FC_EMOJI=$EMOJI FC_WALLET=$WALLET FC_TAOQ_MODE=$TAOQ_MODE first_conversation
+
+# ---- the bot's container after the conversations ----------------------------------
+# Memory (cgroup v2: the peak and any OOM kills inside the container), gateway
+# restarts (supervisord), and errors in OpenClaw's own log. A gateway that died
+# in a turn shows up here, not only as the failed checks after it.
+step "the bot's container after the conversations: memory, gateway restarts, errors"
+dc exec -T bot sh -c 'for f in memory.max memory.peak; do printf "%s: " $f; cat /sys/fs/cgroup/$f 2>/dev/null || echo "?"; done; grep -E "^(oom|oom_kill) " /sys/fs/cgroup/memory.events 2>/dev/null' 2>&1 | sed 's/^/    /'
+oomk=$(dc exec -T bot sh -c 'sed -n "s/^oom_kill //p" /sys/fs/cgroup/memory.events 2>/dev/null' 2>/dev/null | tr -dc 0-9)
+gw_starts=$(dc logs bot 2>&1 | grep -a -c 'spawned: .gateway')
+dc logs bot 2>&1 | grep -a -E 'exited: gateway|Killed|out of memory|identity lost|EPIPE|Uncaught|FATAL' | tail -12 | cut -c1-300 | sed 's/^/    /'
+dc exec -T bot sh -c 'grep -a -h -i -E "identity lost|EPIPE|uncaught|fatal|heap out of memory" /home/node/.openclaw/logs/openclaw-*.log 2>/dev/null | tail -12 | cut -c1-300' 2>&1 | sed 's/^/    log: /'
+check "no process in the bot's container was killed for memory (oom_kill ${oomk:-?})" test "${oomk:-0}" = 0
+check "the gateway was started once in this container (no crash and restart: $gw_starts)" test "$gw_starts" = 1
 
 # ---- an image upgrade: doctor runs once ------------------------------------------
 step "an image upgrade: openclaw doctor --fix runs at the first start of the new image, and only then"

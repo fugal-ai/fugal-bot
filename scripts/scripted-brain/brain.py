@@ -42,6 +42,11 @@ What it answers, by the person's last message (OpenClaw's own trailing
             prompt's <available_skills>: exec `cat` of its SKILL.md (at the
             listed location), then the `sed` command SKILL.md gives for the
             primer section, then that section as the reply
+  an Activity recap request (OpenClaw's utility model, after each finished run;
+       its system prompt starts "Write an Activity recap") -> one short
+       sentence, logged as "[brain] recap -> text bytes=<request bytes>" and
+       NOT as "[brain] -> ...", so the tests count conversation calls and
+       recap calls apart.
   anything else        -> one fixed sentence.
 
 Each request is logged with its size, the size of the prompt's skills list,
@@ -68,6 +73,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 EXPECT_KEY = os.environ.get("BRAIN_EXPECT_KEY", "")
+RECAP_MARK = "Write an Activity recap"   # OpenClaw v2026.11.7, src/gateway/session-activity-summaries.ts
 DUMP = os.environ.get("BRAIN_DUMP", "") == "1"
 TAOQ_ENV = os.environ.get("BRAIN_TAOQ_ENV", "")
 STANDARD_FIELDS = {
@@ -340,13 +346,20 @@ class H(BaseHTTPRequestHandler):
             f"reference_text={'yes' if any(m in everything for m in REFERENCE_MARKS) else 'no'}")
         if DUMP:
             log("dump", raw.decode("utf-8", "replace"))
-        kind, a, b = plan(req)
+        if RECAP_MARK in system:
+            # A recap is not a conversation turn: answer it apart (see the docstring).
+            kind, a, b = "recap", "Scripted recap: the conversation so far, in one sentence.", None
+        else:
+            kind, a, b = plan(req)
         cid, now = f"chatcmpl-{int(time.time()*1000)}", int(time.time())
         if kind == "tool":
             call = {"index": 0, "id": f"call_{now}_{a}", "type": "function",
                     "function": {"name": a, "arguments": json.dumps(b)}}
             msg, finish = {"role": "assistant", "content": None, "tool_calls": [call]}, "tool_calls"
             log("->", a, json.dumps(b)[:300])
+        elif kind == "recap":
+            msg, finish = {"role": "assistant", "content": a}, "stop"
+            log(f"recap -> text bytes={len(raw)}")
         else:
             msg, finish = {"role": "assistant", "content": a}, "stop"
             log("-> text")

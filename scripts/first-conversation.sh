@@ -20,6 +20,13 @@
 #                                bot/tools/fixtures/finney.json.gz; no network)
 # In fixture mode the brain's BRAIN_TAOQ_ENV must also name TAOQ_FIXTURE=/tmp/taoq-fixture.json.gz.
 
+# Model calls as the scripted model saw them: conversation calls ("[brain] -> ...")
+# and Activity recaps ("[brain] recap -> ...", one small call after each finished
+# run, answered apart; see scripts/scripted-brain/brain.py). The model proxy's own
+# counters hold both.
+fc_calls() { brain_log | grep -a -c '\[brain\] -> '; }
+fc_recaps() { brain_log | grep -a -c '\[brain\] recap -> '; }
+
 fc_job() {   # the scheduled jobs, one JSON object per line
   bot_sh 'node -e '\''
 const { DatabaseSync } = require("node:sqlite");
@@ -59,16 +66,26 @@ JS
 # must leave BOOTSTRAP.md in place.
 first_messages() {
   step "first message is not a greeting (scripted model): \"What can you do?\" and a real task"
-  local reply n0 n1 ask sess calls
+  local reply n0 n1 ask sess calls rc0
   for pair in "fc-wcyd|What can you do?|1" "fc-task|What is the price of subnet 70 right now?|2"; do
     IFS='|' read -r sess ask calls <<< "$pair"
-    n0=$(brain_log | grep -a -c '\[brain\] -> ')
+    n0=$(brain_log | grep -a -c '\[brain\] -> '); rc0=$(fc_recaps)
     reply=$(chat "$sess" "$ask")
     n1=$(brain_log | grep -a -c '\[brain\] -> ')
     echo "\"$ask\" ->"; printf '%s\n' "$reply" | sed 's/^/    /' | head -8
     check "\"$ask\" as the first message: answered, the daily briefing offered in one line, no word about instruction files or reasoning" \
       bash -c '[[ "$0" == *"daily briefing"* && "$0" != *SCRIPTED-BRAIN* ]] && ! grep -a -q -i -E "bootstrap|agents\.md|instruction|per my|I should" <<< "$0"' "$reply"
     check "\"$ask\": $calls model call(s) ($((n1 - n0)))" test "$((n1 - n0))" = "$calls"
+    if [ "$sess" = fc-wcyd ]; then
+      # The Activity recap of that finished run: one small call of its own.
+      local r i bytes
+      for i in $(seq 1 45); do [ "$(fc_recaps)" -gt "$rc0" ] && break; sleep 1; done
+      sleep 5
+      r=$(( $(fc_recaps) - rc0 ))
+      bytes=$(brain_log | grep -a '\[brain\] recap -> ' | tail -1 | sed -n 's/.*bytes=\([0-9]*\).*/\1/p')
+      check "the Activity recap of that turn: one call ($r), a small request (${bytes:-?} bytes, under 8000)" \
+        test "$r" = 1 -a "${bytes:-99999}" -lt 8000
+    fi
   done
   check "BOOTSTRAP.md is still there after those first messages" bot_sh 'test -s /home/node/workspace/BOOTSTRAP.md'
 }
@@ -157,7 +174,7 @@ except Exception: print("?")' "$job"))" \
   check "BOOTSTRAP.md is retired (deleted)" bot_sh 'test ! -e /home/node/workspace/BOOTSTRAP.md'
   check "USER.md has the time zone, MEMORY.md the job id" \
     bot_sh "grep -q 'America/New_York' /home/node/workspace/USER.md && grep -q -- '$jid' /home/node/workspace/MEMORY.md"
-  echo "model proxy: $(( $(jnum "$u1" total.requests) - $(jnum "$u0" total.requests) )) model calls for the first two turns"
+  echo "model proxy: $(( $(jnum "$u1" total.requests) - $(jnum "$u0" total.requests) )) model calls for the first two turns (with their Activity recaps)"
 
   step "the schedule runs (forced now through the automations tool; a scheduled run is the same)"
   n0=$(brain_log | grep -a -c 'cron-run step=')
@@ -187,7 +204,7 @@ except Exception: print("?")' "$job")"
 st = json.loads(sys.argv[1])["state"]
 ok = st.get("lastRunStatus", st.get("lastStatus")) == "ok"
 sys.exit(0 if ok else 1)' "${job:-{\}}"
-  echo "model proxy: $(( $(jnum "$u2" total.requests) - $(jnum "$u1" total.requests) )) model calls for the run-now turn and the run (2 + 2)"
+  echo "model proxy: $(( $(jnum "$u2" total.requests) - $(jnum "$u1" total.requests) )) model calls for the run-now turn and the run (2 + 2, plus their Activity recaps)"
   done_at=$(fc_setup_done)
   check "OpenClaw itself recorded the first run as complete once the file was gone (workspace_setup_state.setup_completed_at = ${done_at:-empty})" \
     bash -c '[[ "$0" =~ ^20[0-9][0-9]- ]]' "$done_at"
@@ -298,7 +315,7 @@ sys.exit(0 if ok else 1)' "${job:-{\}}" "$hk"
   # start, forced runs); the next run works. So the check allows that one failure, says so,
   # and runs again. Model calls: 2 for each asking turn (run, reply), none for the runs.
   at0=$(fc_watch_state "$state")
-  u0=$(usage); r0=$(fc_rows "RESOLVED (was warning)")
+  u0=$(usage); c0=$(fc_calls); r0=$(fc_rows "RESOLVED (was warning)")
   local asks=1
   reply=$(chat first-run "Run the hotkey watch now: job $wid")
   echo "reply: ${reply:0:240}"
@@ -315,9 +332,9 @@ sys.exit(0 if ok else 1)' "${job:-{\}}" "$hk"
   fi
   check "the script job ran and taoq saved a new check ($at0 -> $at1)" test -n "$at1" -a "$at1" != "$at0"
   sleep 3
-  u1=$(usage)
-  check "the quiet check made no model call (only the $((2 * asks)) calls of the asking turn(s): $(( $(jnum "$u1" total.requests) - $(jnum "$u0" total.requests) )))" \
-    test $(( $(jnum "$u1" total.requests) - $(jnum "$u0" total.requests) )) = $((2 * asks))
+  u1=$(usage); c1=$(fc_calls)
+  check "the quiet check made no model call (only the $((2 * asks)) calls of the asking turn(s): $((c1 - c0)); with recaps, the model proxy counted $(( $(jnum "$u1" total.requests) - $(jnum "$u0" total.requests) )))" \
+    test $((c1 - c0)) = $((2 * asks))
   job=$(fc_job | grep -a "\"id\":\"$wid\"" | head -1)
   st=$(python3 -I -c 'import json,sys
 try: print(json.dumps(json.loads(sys.argv[1])["state"])[:500])
@@ -330,13 +347,13 @@ sys.exit(0 if st.get("lastRunStatus", st.get("lastStatus")) == "ok" else 1)' "${
   # A change: the last check knew a warning that has gone.
   fc_watch_plant "$state"
   at0=$(fc_watch_state "$state")
-  u2=$(usage)
+  u2=$(usage); c2=$(fc_calls)
   reply=$(chat first-run "Run the hotkey watch now: job $wid")
   at1=$(fc_wait_state_change "$state" "$at0") || true
   check "the second run saved its check ($at0 -> $at1)" test -n "$at1" -a "$at1" != "$at0"
   sleep 3
-  u3=$(usage)
+  u3=$(usage); c3=$(fc_calls)
   r1=$(fc_rows "RESOLVED (was warning)")
-  check "the change was delivered into the conversation without a model call (session rows with the notice: $r0 -> $r1; calls $(( $(jnum "$u3" total.requests) - $(jnum "$u2" total.requests) )))" \
-    test "${r1:-0}" -gt "${r0:-0}" -a $(( $(jnum "$u3" total.requests) - $(jnum "$u2" total.requests) )) = 2
+  check "the change was delivered into the conversation without a model call (session rows with the notice: $r0 -> $r1; calls of the asking turn $((c3 - c2)); with recaps, the model proxy counted $(( $(jnum "$u3" total.requests) - $(jnum "$u2" total.requests) )))" \
+    test "${r1:-0}" -gt "${r0:-0}" -a $((c3 - c2)) = 2
 }
