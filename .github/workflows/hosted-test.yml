@@ -1,0 +1,89 @@
+# Hosted-mode test (scripts/hosted-test.sh) against the images of one `images`
+# workflow run, on GitHub, so no Docker is needed on a development machine.
+#
+# Start it by hand with the id of an `images` run (the number in the run's
+# URL). It downloads that run's room bundle (fugal-bot-room-<version>.tgz),
+# runs the script with --no-build against the four digest-pinned images in the
+# bundle's images.env, and uploads the log. The three compose files are taken
+# from the bundle, so what is tested is what a room gets. Scripted model only
+# and recorded chain reads (HOSTED_TEST_TAOQ=fixture): no secrets, no paid call.
+name: hosted-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      images_run:
+        description: Id of the images workflow run whose room bundle is tested
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read    # download the other run's artifact
+      packages: read   # pull the images by digest
+    env:
+      IMAGES_RUN: ${{ inputs.images_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the room bundle of the images run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          case "$IMAGES_RUN" in ''|*[!0-9]*) echo "images_run must be a run id (digits)"; exit 1;; esac
+          mkdir ../bundle-dl
+          gh run download "$IMAGES_RUN" -p 'fugal-bot-room-*' -D ../bundle-dl
+          tgz=$(ls ../bundle-dl/*/fugal-bot-room-*.tgz ../bundle-dl/fugal-bot-room-*.tgz 2>/dev/null | head -n1)
+          test -n "$tgz"
+          echo "bundle: $tgz"
+          mkdir ../bundle
+          tar -xzf "$tgz" -C ../bundle
+          ls ../bundle
+          test "$(grep -c -E '^[A-Z]+_IMAGE=ghcr\.io/[a-z0-9./-]+@sha256:[0-9a-f]{64}$' ../bundle/images.env)" = 4
+          cat ../bundle/images.env
+          # Test the bundle's own compose files, not this checkout's.
+          for f in compose.yaml compose.cathedral.yaml compose.hosted.yaml; do
+            cmp -s "../bundle/$f" "$f" || echo "note: $f differs from this checkout; using the bundle's"
+            cp "../bundle/$f" "$f"
+          done
+
+      - name: Log in to the registry (pull only)
+        env:
+          GH_ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+
+      - name: scripts/hosted-test.sh --no-build
+        env:
+          HOSTED_TEST_TAOQ: fixture
+        run: |
+          set +e -u
+          set -a; . ../bundle/images.env; set +a
+          mkdir -p "$RUNNER_TEMP/log"
+          scripts/hosted-test.sh --no-build 2>&1 | tee "$RUNNER_TEMP/log/hosted-test.log"
+          rc=${PIPESTATUS[0]}
+          {
+            echo "### hosted-test against images run $IMAGES_RUN (exit $rc)"
+            echo
+            echo '```'
+            grep -E '^(FAIL|== result)' "$RUNNER_TEMP/log/hosted-test.log" | tail -n 25
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: hosted-test-log-${{ inputs.images_run }}
+          path: ${{ runner.temp }}/log/hosted-test.log
+          if-no-files-found: warn
