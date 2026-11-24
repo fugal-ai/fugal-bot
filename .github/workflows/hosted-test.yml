@@ -72,6 +72,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
 
+      - name: Compose version
+        run: docker version --format '{{.Server.Version}}'; docker compose version
+
       - name: scripts/hosted-test.sh --no-build
         env:
           HOSTED_TEST_TAOQ: fixture

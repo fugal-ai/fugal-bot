@@ -11,7 +11,7 @@
 # stands in for the presigned-URL storage (scripts/object-store.py).
 x-shared: &shared
   network_mode: "service:netns"
-  networks: !reset []
+  networks: !reset null
 
 services:
   netns:
