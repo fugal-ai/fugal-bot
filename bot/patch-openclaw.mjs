@@ -11,7 +11,8 @@
 //
 // Only what cannot be set by configuration is patched here (checked against
 // OpenClaw v2026.11.7's config schema). Every patch hides or rewords
-// something that cannot work in a hosted bot; none widens what the bot can do.
+// something that cannot work in a hosted bot, or puts our product name and
+// starter prompts where upstream shows its own; none widens what the bot can do.
 //
 // Browser caching: the gateway serves dist/control-ui/assets/* as immutable
 // under their hashed names. A patched file keeps its name, so a browser that
@@ -22,6 +23,28 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+
+// The product name the hosted Control UI shows where upstream shows its own
+// (OpenClaw has no config setting for it: the name comes from the theme, and
+// only a plugin theme can set one). The bot's own name (BOT_DISPLAY_NAME, the
+// agent identity) is shown by OpenClaw itself wherever it names the agent.
+// The About page keeps upstream's name and licence credit.
+const BRAND = "Fugal Bot";
+// A patch that only rewords display text: the same span with our name for
+// upstream's. Each `find` is chosen to hold user-visible strings only.
+const rebrand = (id, dir, ext, find) => ({ id, dir, ext, find, replace: find.replaceAll("OpenClaw", BRAND) });
+
+// Starter prompts on an empty chat: label and prompt are the same text (a
+// chip puts it in the composer and sends it). Plain text without "." or "`":
+// the UI looks each one up as a translation key and, finding none, shows it
+// as it is.
+export const STARTERS = [
+  "Send me a daily briefing",
+  "Watch a subnet for me",
+  "Watch a miner or validator hotkey",
+  "What changed on Bittensor this week?",
+];
+const starterList = `[${STARTERS.map((s) => `\`${s}\``).join(",")}]`;
 
 export const PATCHES = [
   // --- Plugins page -------------------------------------------------------------
@@ -105,6 +128,114 @@ export const PATCHES = [
     find: "  </head>",
     replace:
       '    <style id="fugal-hosted">.chat-talk-control,.chat-mobile-dictation-action,.chat-mobile-talk-action{display:none!important}</style>\n  </head>',
+  },
+
+  // --- Empty chat: starter prompts -----------------------------------------------------
+  // The empty chat showed starter chips only while the owner had no other
+  // chat; from the second chat on it showed "Recent chats" instead (the same
+  // chats as the sidebar). Always show the starters.
+  {
+    id: "chat-welcome-always-starters",
+    dir: "dist/control-ui/assets",
+    ext: ".js",
+    find: "get when(){return n().length>0},get fallback(){var t=rPe();",
+    replace: "get when(){return!1},get fallback(){var t=rPe();",
+  },
+  // Upstream's chips are about OpenClaw itself (channels, its code, pull
+  // requests); ours are what this bot is for. Both upstream sets (chosen by
+  // the kind of operator sign-in) get the same four.
+  {
+    id: "chat-welcome-starter-texts",
+    dir: "dist/control-ui/assets",
+    ext: ".js",
+    find:
+      "ZAe=[`chat.welcome.suggestions.whatCanYouDo`,`chat.welcome.suggestions.summarizeRecentSessions`," +
+      "`chat.welcome.suggestions.configureChannel`,`chat.welcome.suggestions.checkSystemHealth`]," +
+      "QAe=[`chat.welcome.suggestions.whatCanYouDo`,`chat.welcome.suggestions.exploreOpenClaw`," +
+      "`chat.welcome.suggestions.investigateInSandbox`,`chat.welcome.suggestions.openDraftPullRequest`]",
+    replace: `ZAe=${starterList},QAe=${starterList}`,
+  },
+
+  // --- Product name ----------------------------------------------------------------------
+  // The default theme's branding: the tab title ("Chat — <name>"), the "Ask
+  // <name>" entry, the sidebar name when no agent name is set, the sign-in
+  // and profile pages.
+  {
+    id: "brand-name-default",
+    dir: "dist/control-ui/assets",
+    ext: ".js",
+    find: "brandName:e?.brandName??`OpenClaw`,",
+    replace: `brandName:e?.brandName??\`${BRAND}\`,`,
+  },
+  // ...except the About page, which describes the software: it keeps
+  // upstream's product name above upstream's links and licence line.
+  {
+    id: "about-page-keeps-upstream-name",
+    dir: "dist/control-ui/assets",
+    ext: ".js",
+    find: "w(r,()=>n.read().brandName)",
+    replace: "w(r,()=>_(`aboutPage.productName`))",
+  },
+  // The title before the app sets its own (first paint, a page that fails to load).
+  {
+    id: "page-title",
+    dir: "dist/control-ui",
+    ext: ".html",
+    find: "<title>OpenClaw Control</title>",
+    replace: `<title>${BRAND}</title>`,
+  },
+  // "Ask OpenClaw" (the setup helper panel): its name, composer placeholder,
+  // progress and error lines, and the panel controls.
+  rebrand(
+    "ask-panel-texts",
+    "dist/control-ui/assets",
+    ".js",
+    "custodian:{pluginPlaceholder:`Ask OpenClaw about {plugin}`,pluginIntroTitle:`Ask about {plugin}`," +
+      "pluginStarterPurpose:`What does it do?`,pluginStarterTools:`What tools does it have?`," +
+      "pluginStarterSetup:`How do I set it up?`,pluginPromptPurpose:`What does {plugin} do?`," +
+      "pluginPromptTools:`What tools does {plugin} provide?`,pluginPromptSetup:`How do I set up {plugin}?`," +
+      "pluginHelpQuestion:`Explain {setting}`,pluginHelpFailed:`Could not prepare the setting question. Try Ask OpenClaw again.`," +
+      "pluginHelpUnset:`Not set`,pluginHelpValue:`Current value: {value}`,title:`OpenClaw`," +
+      "subtitleCaretaker:`System setup and care.`,exitSetup:`Exit setup`,hatchDraft:`Wake up, my friend!`," +
+      "placeholder:`Message OpenClaw…`,sensitivePlaceholder:`Enter sensitive value…`," +
+      "sensitiveReply:`Sensitive reply sent`,cancel:`Cancel`,send:`Send`,thinking:`OpenClaw is thinking`," +
+      "earlier:`Earlier`,requestFailed:`OpenClaw could not reply. Try again.`",
+  ),
+  rebrand(
+    "ask-panel-controls",
+    "dist/control-ui/assets",
+    ".js",
+    "panel:{title:`OpenClaw`,toggle:`Toggle Ask OpenClaw`,close:`Close Ask OpenClaw`," +
+      "resize:`Resize Ask OpenClaw`,dockBottom:`Dock Ask OpenClaw at bottom`,dockRight:`Dock Ask OpenClaw at right`}",
+  ),
+  // Automations page: the prompt box and the two hints about it.
+  rebrand("automations-subtitle", "dist/control-ui/assets", ".js",
+    "newSubtitle:`Describe what OpenClaw should do, then pick when it runs.`"),
+  rebrand("automations-prompt-placeholder", "dist/control-ui/assets", ".js",
+    "promptPlaceholder:`Describe what OpenClaw should do...`"),
+  rebrand("automations-empty-hint", "dist/control-ui/assets", ".js",
+    "emptyHint:`Describe what OpenClaw should do and when — it runs on schedule.`"),
+  // Default voice wake words, shown under Settings > Talk (only paired devices
+  // listen for them, and none can be paired here). A list the owner saved is kept.
+  {
+    id: "voice-wake-default-words",
+    dir: "dist",
+    ext: ".mjs",
+    find: 'const DEFAULT_TRIGGERS = [\n\t"openclaw",',
+    replace: 'const DEFAULT_TRIGGERS = [\n\t"fugal bot",',
+  },
+
+  // --- Apps page ------------------------------------------------------------------------------
+  // Download links for OpenClaw's phone, watch, desktop and browser companions
+  // and for ClawHub; none can connect to a hosted bot (no device pairing, no
+  // marketplace). Left out of the sidebar the way upstream leaves out
+  // Templates when they are off (the command palette still lists it).
+  {
+    id: "sidebar-hide-apps",
+    dir: "dist/control-ui/assets",
+    ext: ".js",
+    find: "enabledRouteIds:Wy(t.runtimeConfig.state)===!0?wt:wt.filter(e=>e!==`templates`),",
+    replace: "enabledRouteIds:(Wy(t.runtimeConfig.state)===!0?wt:wt.filter(e=>e!==`templates`)).filter(e=>e!==`apps`),",
   },
 ];
 

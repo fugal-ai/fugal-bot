@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
-import { PATCHES, applyPatches } from "./patch-openclaw.mjs";
+import { PATCHES, STARTERS, applyPatches } from "./patch-openclaw.mjs";
 import { ownerDisplayName, setOwnerName } from "./owner-name.mjs";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "fugal-patch-"));
@@ -76,6 +76,16 @@ await test("the patch list is well formed", () => {
     // Nothing that loads more code or reaches the network is added.
     assert.doesNotMatch(p.replace, /<script|https?:|import\(|fetch\(/, p.id);
   }
+  // Starter texts go into a template literal and are looked up as translation
+  // keys (a "." would split them into a key path).
+  assert.equal(STARTERS.length, 4);
+  for (const s of STARTERS) assert.match(s, /^[^.`$\\]+$/, s);
+});
+
+await test("the About page keeps upstream's name and licence credit", () => {
+  for (const p of PATCHES) {
+    assert.doesNotMatch(p.find, /OpenClaw Foundation|MIT License/, p.id);
+  }
 });
 
 const pkg = (process.env.OPENCLAW_PACKAGE || "").trim();
@@ -86,6 +96,13 @@ if (pkg) {
     const log = applyPatches(r);
     assert.equal(log.length, PATCHES.length);
     for (const line of log) console.log(`    ${line}`);
+    const html = read(r, "dist/control-ui/index.html");
+    assert.match(html, /<title>Fugal Bot<\/title>/);
+    assert.doesNotMatch(html, /<title>[^<]*OpenClaw/);
+    const assets = path.join(r, "dist/control-ui/assets");
+    const ui = fs.readdirSync(assets).filter((n) => n.endsWith(".js")).map((n) => fs.readFileSync(path.join(assets, n), "utf8")).join("\n");
+    for (const s of STARTERS) assert.ok(ui.includes(`\`${s}\``), s);
+    assert.ok(ui.includes("© 2026 OpenClaw Foundation — MIT License."), "About page credit kept");
     fs.rmSync(r, { recursive: true, force: true });
   });
 }

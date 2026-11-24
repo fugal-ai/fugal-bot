@@ -137,6 +137,13 @@ async function identityChecks(page, view) {
     if (seen.accent === ACCENT) pass(`browser: ${where}the accent colour is ${ACCENT}`);
     else fail(`browser: ${where}the accent colour is "${seen.accent}", expected ${ACCENT}`);
   }
+  // bot/patch-openclaw.mjs: our product name instead of upstream's, our starter prompts.
+  if (!/OpenClaw/.test(seen.title)) pass(`browser: ${where}the page title does not say OpenClaw`);
+  else fail(`browser: ${where}the page title "${seen.title}" says OpenClaw`);
+  const ours = ["Send me a daily briefing", "Watch a subnet for me", "Watch a miner or validator hotkey"];
+  if (ours.every((s) => seen.text.includes(s))) pass(`browser: ${where}the empty chat shows the Fugal starter prompts`);
+  else if (/What can you do\?|Recent chats/.test(seen.text)) fail(`browser: ${where}the empty chat shows upstream's starters or "Recent chats", not ours`);
+  else console.log(`      (the chat is not empty here, so no starter prompts are shown)`);
 }
 
 // ---- hosted: the bot inside a frame on the site's page ---------------------------------
