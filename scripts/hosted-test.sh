@@ -348,6 +348,8 @@ check ".env.example sets no variable twice${dupes:+ (twice: $dupes)}" test -z "$
 # ---- start ---------------------------------------------------------------------
 step "start from the app directory: docker compose up -d --no-build (GATE_SSO=on, scripted model)"
 wait_mem
+# The five files must make one valid project, or nothing below can work.
+dc config --quiet 2>"$HT/tmp/project.err" || { cat "$HT/tmp/project.err"; bad "the five compose files do not make a valid project"; echo "== result: $PASS passed, $FAIL failed"; exit 1; }
 dc up -d --no-build 2>&1 | tail -3
 check "bot and proxy healthy" wait_healthy
 START1=$HEALTHY_S

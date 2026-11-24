@@ -9,10 +9,6 @@
 #
 # Added for the test: "store", a throwaway object store on loopback that
 # stands in for the presigned-URL storage (scripts/object-store.py).
-x-shared: &shared
-  network_mode: "service:netns"
-  networks: !reset null
-
 services:
   netns:
     image: caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
@@ -25,20 +21,24 @@ services:
     mem_limit: 32m
 
   bot:
-    <<: *shared
+    network_mode: "service:netns"
+    networks: !reset null
     build:
       context: ./bot
       network: default   # test host: never build with the host network
     depends_on: [netns]
     mem_limit: 2560m
   modelproxy:
-    <<: *shared
+    network_mode: "service:netns"
+    networks: !reset null
     depends_on: [netns]
   gate:
-    <<: *shared
+    network_mode: "service:netns"
+    networks: !reset null
     depends_on: [netns]
   proxy:
-    <<: *shared
+    network_mode: "service:netns"
+    networks: !reset null
     build:
       context: ./proxy
       dockerfile: Dockerfile.nocap
@@ -48,19 +48,24 @@ services:
       # port published by "netns" reaches it. In a room it stays 127.0.0.1.
       PROXY_LISTEN_HOST: ""
   brain:
-    <<: *shared
+    network_mode: "service:netns"
+    networks: !reset null
     depends_on: [netns]
   tunnel:
-    <<: *shared
+    network_mode: "service:netns"
+    networks: !reset null
   backup:
-    <<: *shared
+    network_mode: "service:netns"
+    networks: !reset null
     depends_on: [netns]
   restore:
-    <<: *shared
+    network_mode: "service:netns"
+    networks: !reset null
     depends_on: [netns]
 
   store:
-    <<: *shared
+    network_mode: "service:netns"
+    networks: !reset null
     image: ${BRAIN_IMAGE:-fugal-bot-scripted-brain:test}   # any image with python3
     entrypoint: ["python3", "-I", "-u", "/object-store.py", "127.0.0.1", "18999", "/store"]
     user: "${HOSTED_TEST_UID:?set by scripts/hosted-test.sh}"
