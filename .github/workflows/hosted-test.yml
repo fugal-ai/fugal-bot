@@ -13,8 +13,12 @@ on:
   workflow_dispatch:
     inputs:
       images_run:
-        description: Id of the images workflow run whose room bundle is tested
-        required: true
+        description: Id of the images workflow run whose room bundle is tested (empty - the latest successful images run on this branch)
+        required: false
+  # Also on a change to this file (and nothing else), so the workflow is known
+  # to GitHub while it only exists on a branch; tests the branch's latest images run.
+  push:
+    paths: [.github/workflows/hosted-test.yml]
 
 permissions:
   contents: read
@@ -40,6 +44,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -eu
+          if [ -z "$IMAGES_RUN" ]; then
+            IMAGES_RUN=$(gh run list -w images.yml --branch "$GITHUB_REF_NAME" --status success -L 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          echo "images run: $IMAGES_RUN"
+          echo "IMAGES_RUN=$IMAGES_RUN" >> "$GITHUB_ENV"
           case "$IMAGES_RUN" in ''|*[!0-9]*) echo "images_run must be a run id (digits)"; exit 1;; esac
           mkdir ../bundle-dl
           gh run download "$IMAGES_RUN" -p 'fugal-bot-room-*' -D ../bundle-dl
@@ -84,6 +93,6 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: hosted-test-log-${{ inputs.images_run }}
+          name: hosted-test-log-${{ env.IMAGES_RUN }}
           path: ${{ runner.temp }}/log/hosted-test.log
           if-no-files-found: warn
