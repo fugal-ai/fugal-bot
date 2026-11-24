@@ -27,7 +27,12 @@ services:
       context: ./bot
       network: default   # test host: never build with the host network
     depends_on: [netns]
-    mem_limit: 2560m
+    # The room's limit (the controller's FB_BOT_MEM_LIMIT default, BOT_MEM_LIMIT
+    # in the .env this test writes). With 2560m, OpenClaw v2026.11.7 plus the
+    # bot's browser peaked at 2.52 GB (94%), and one run lost its shell child
+    # and then the gateway itself mid-turn. hosted-test.sh reports the peak
+    # and fails on any OOM kill or gateway restart.
+    mem_limit: 4g
   modelproxy:
     network_mode: "service:netns"
     networks: !reset null
