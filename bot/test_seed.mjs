@@ -116,7 +116,7 @@ test("production case 2: AGENTS.md was edited -> never touched; USER.md the agen
   configExists(h);
   const edited = render(PREV["AGENTS.md"], VARS) + "\n## Learned\n\n- The user likes short answers.\n";
   write(h, "AGENTS.md", edited);
-  const user = current("USER.md").replace("not known yet. Ask when a schedule needs it.", "America/New_York");
+  const user = current("USER.md").replace(/not known yet\. Ask when a schedule needs it[^\n]*/, "America/New_York");
   write(h, "USER.md", user);
   for (const n of ["IDENTITY.md", "SOUL.md"]) write(h, n, current(n));
   const before = fs.statSync(ws(h, "AGENTS.md")).mtimeMs;

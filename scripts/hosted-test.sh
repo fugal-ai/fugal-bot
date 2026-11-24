@@ -258,7 +258,7 @@ RESTORE_IDENTITY_FILE=$HT/restore/identity.txt
 # ---- this test only ----
 SMOKE_CANARY_KEY=$CANARY_KEY
 BRAIN_IMAGE=$BRAIN_IMG
-BRAIN_TAOQ_ENV=TAOQ_FEED_FIXTURE=/tmp/taoq-feed.json$([ "$TAOQ_MODE" = fixture ] && echo " TAOQ_FIXTURE=/tmp/taoq-fixture.json.gz TAOQ_ENDPOINTS=ws://127.0.0.1:9")
+BRAIN_TAOQ_ENV=TAOQ_RECORD=/tmp/taoq-record.json TAOQ_FEED_FIXTURE=/tmp/taoq-feed.json$([ "$TAOQ_MODE" = fixture ] && echo " TAOQ_FIXTURE=/tmp/taoq-fixture.json.gz TAOQ_ENDPOINTS=ws://127.0.0.1:9")
 HOSTED_TEST_UID=$(id -u):$(id -g)
 HOSTED_TEST_STORE_SCRIPT=$REPO/scripts/object-store.py
 HOSTED_TEST_STORE_DIR=$HT/store

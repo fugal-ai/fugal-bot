@@ -23,15 +23,22 @@ What it answers, by the person's last message (OpenClaw's own trailing
        "What is the price of subnet N ..." (same) -> exec `taoq subnet N --text`, then
                                   its output + the one-line offer
        "Hi"                       -> the greeting, copied out of BOOTSTRAP.md
-       "... daily briefing ... <Area/City>" -> exec `taoq briefing <address
-            from the workspace files> --text`; automations add (the daily
-            job, its message copied out of the recipe in AGENTS.md); exec
-            (notes, rm BOOTSTRAP.md); the briefing + one line
+       "... daily briefing ... <Area/City>" -> automations list (only if
+            AGENTS.md says to list the jobs first); automations add (a SCRIPT
+            job: the script copied out of the recipe in AGENTS.md, running
+            `taoq briefing <address from the workspace files> --text`);
+            automations run (forced: it delivers today's briefing as printed,
+            with no model call); exec (notes, rm BOOTSTRAP.md); one line
+       "Send me a daily briefing" -> automations list; run the "Daily briefing"
+            job found there (never a second one); one line
+       "Which automations do I have?" -> automations list; their names
        "Run the daily briefing now: job <id>" -> automations run (forced)
-       "Watch this hotkey for me: <hotkey> on subnet 70 ... <Area/City>" -> exec
-            `taoq hotkey <hotkey> --netuid 70 --watch --text`; automations add
-            (a SCRIPT job: the script is copied out of the recipe in AGENTS.md,
-            so the test runs the very text a real model is given); the reply
+       "Watch this hotkey for me: <hotkey> on subnet 70 [<Area/City>]" -> the
+            time zone from the message, else from USER.md's "Time zone" line
+            (only if AGENTS.md says not to ask for what USER.md says; else it
+            asks); automations list; add (the same script recipe, running
+            `taoq hotkey <hotkey> --netuid 70 --watch --text`); run (forced:
+            the first check, delivered with no model call); one line
        "Run the hotkey watch now: job <id>" -> automations run (forced)
        "Open <site> ... subnet <N>" -> exec `taoq subnet <N> --text` (only if
             AGENTS.md sends such questions to taoq), then its output as the reply
@@ -128,8 +135,13 @@ STAMP = re.compile(r"^\s*\[[^\]\n]{0,80}\]\s*")
 
 
 HOTKEY = re.compile(r"hotkey[^5]*?(5[1-9A-HJ-NP-Za-km-z]{46,48})")
-# The daily briefing recipe in AGENTS.md: Job "Daily briefing", expr `0 8 * * *` ..., message: `<message>`
-BRIEFING_JOB = re.compile(r'Job "Daily briefing", expr `0 8 \* \* \*`[^`]*?message: `(Run exactly: taoq briefing <address> --text\.[^`]*)`')
+# The daily briefing recipe in AGENTS.md: Job "Daily briefing", expr `0 8 * * *` ..., <COMMAND> = `taoq briefing <address> --text`
+BRIEFING_JOB = re.compile(r'Job "Daily briefing", expr `0 8 \* \* \*`[^`]*?<COMMAND> = `(taoq briefing <address> --text)`')
+# AGENTS.md: read the existing jobs before saying what is scheduled, offering or making one.
+LIST_FIRST = "read the jobs there are: `automations` action `list`"
+# AGENTS.md: what USER.md says is not asked again (the time zone line of USER.md).
+KNOWN_FIRST = "Ask only for what USER.md and MEMORY.md do not say"
+USER_ZONE = re.compile(r"- Time zone: ([A-Z][a-z]+/[A-Z][A-Za-z_]+)")
 OFFER = "Want a daily briefing for the wallet you signed in with: your stake, what changed on your subnets and the day's Bittensor news? Tell me your time zone."
 # "Open taostats.io and tell me what it shows for subnet 70"
 SITE_ASK = re.compile(r"(?i)\bopen ([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b.*?\bsubnet (\d{1,3})\b", re.S)
@@ -155,6 +167,46 @@ def skills_list(system):
     return system[a:b + len("</available_skills>")] if a >= 0 and b > a else ""
 
 
+def automations(tools, args):
+    return call_tool(tools, "automations", args, "cron")
+
+
+def jobs_in(result):
+    """(name, id) of every job in an automations list result."""
+    text = text_of(result.get("content"))
+    found = []
+
+    def walk(v):
+        if isinstance(v, dict):
+            jid = v.get("id") or v.get("jobId")
+            if isinstance(v.get("name"), str) and isinstance(jid, str):
+                found.append((v["name"], jid))
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+    try:
+        walk(json.loads(text))
+    except ValueError:
+        # Not plain JSON: pair each job name with the nearest job id.
+        ids = [(m.start(), m.group(0)) for m in JOB_ID.finditer(text)]
+        for m in re.finditer(r'"?name"?\s*[:=]\s*"([^"]+)"', text):
+            if ids:
+                found.append((m.group(1), min(ids, key=lambda i: abs(i[0] - m.start()))[1]))
+    return found
+
+
+def script_job(system, name, expr, zone, command):
+    """A job made from the script recipe in AGENTS.md, as a model that follows it would."""
+    recipe = WATCH_SCRIPT.search(system)
+    if not recipe:
+        return None
+    script = json.loads(recipe.group(1)).replace("<COMMAND>", taoq_cmd(command)).replace("<NAME>", name)
+    return {"name": name, "schedule": {"kind": "cron", "expr": expr, "tz": zone},
+            "sessionTarget": "isolated", "payload": {"kind": "script", "script": script}}
+
+
 def first_conversation(ask, system, tools, results):
     step = len(results)
     ask = STAMP.sub("", ask)
@@ -178,47 +230,80 @@ def first_conversation(ask, system, tools, results):
         g = GREETING.search(system)
         return ("text", g.group(1) if g else "SCRIPTED-BRAIN: no greeting found in BOOTSTRAP.md", None)
     if "daily briefing" in ask.lower() and ZONE.search(ask):
+        # AGENTS.md "Schedules": list the jobs, add the script job, run it once (that
+        # delivers today's briefing as printed), notes, a one-line reply.
         addr = ADDRESS.search(system)
         if not addr:
             return ("text", "SCRIPTED-BRAIN: no address in the workspace files", None)
         addr, zone = addr.group(1), ZONE.search(ask).group(1)
-        report = f"taoq briefing {addr} --text"
+        recipe = BRIEFING_JOB.search(system)
+        if not recipe:
+            return ("text", "SCRIPTED-BRAIN: no daily briefing recipe in the workspace files", None)
+        report = recipe.group(1).replace("<address>", addr)
         if step == 0:
-            return call_tool(tools, "exec", {"command": taoq_cmd(report)})
+            if LIST_FIRST not in system:
+                return ("text", "SCRIPTED-BRAIN: AGENTS.md does not say to list the jobs first", None)
+            return automations(tools, {"action": "list"})
         if step == 1:
-            recipe = BRIEFING_JOB.search(system)
-            if not recipe:
-                return ("text", "SCRIPTED-BRAIN: no daily briefing recipe in the workspace files", None)
-            message = recipe.group(1).replace("<address>", addr)
-            job = {"name": "Daily briefing", "schedule": {"kind": "cron", "expr": "0 8 * * *", "tz": zone},
-                   "sessionTarget": "isolated",
-                   "payload": {"kind": "agentTurn", "lightContext": True, "toolsAllow": ["exec"], "timeoutSeconds": 300,
-                               "message": message}}
-            return call_tool(tools, "automations", {"action": "add", "job": job}, "cron")
+            if any(n == "Daily briefing" for n, _ in jobs_in(results[0])):
+                return ("text", "SCRIPTED-BRAIN: a Daily briefing job is already there", None)
+            job = script_job(system, "Daily briefing", "0 8 * * *", zone, report)
+            if not job:
+                return ("text", "SCRIPTED-BRAIN: no script recipe in the workspace files", None)
+            return automations(tools, {"action": "add", "job": job})
+        jid = JOB_ID.search(text_of(results[1].get("content")))
+        jid = jid.group(0) if jid else "unknown"
         if step == 2:
-            jid = JOB_ID.search(text_of(results[1].get("content")))
-            jid = jid.group(0) if jid else "unknown"
-            cmd = (f"printf '%s\\n' '- Time zone: {zone}' '- Wants: daily briefing at 08:00' >> ~/workspace/USER.md && "
+            return automations(tools, {"action": "run", "jobId": jid, "runMode": "force"})
+        if step == 3:
+            cmd = (f"sed -i 's|^- Time zone: .*|- Time zone: {zone}|' ~/workspace/USER.md && "
+                   f"printf '%s\\n' '- Wants: daily briefing at 08:00' >> ~/workspace/USER.md && "
                    f"printf '%s\\n' '# MEMORY.md' '- Job \"Daily briefing\" id {jid}, cron 0 8 * * * {zone}, command: {report}' "
                    f">> ~/workspace/MEMORY.md && rm -f ~/workspace/BOOTSTRAP.md && echo retired")
             return call_tool(tools, "exec", {"command": cmd})
-        first = text_of(results[0].get("content"))
-        return ("text", f"{first.strip()}\n\nScheduled: this briefing every day at 08:00 {zone}. "
+        return ("text", f"Scheduled: this briefing every day at 08:00 {zone}; today's arrives here as its own message. "
                         "Ask me to change or stop it.", None)
-    if ask.lower().startswith("watch this hotkey") and HOTKEY.search(ask) and ZONE.search(ask):
-        hk, zone = HOTKEY.search(ask).group(1), ZONE.search(ask).group(1)
+    if said.lower().rstrip("?!. ") in ("send me a daily briefing", "which automations do i have"):
+        # N1: what is scheduled is read from the automations list, never guessed;
+        # an existing job is run, not made a second time.
+        if LIST_FIRST not in system:
+            return ("text", "SCRIPTED-BRAIN: AGENTS.md does not say to list the jobs first", None)
+        if step == 0:
+            return automations(tools, {"action": "list"})
+        jobs = jobs_in(results[0])
+        if said.lower().startswith("which"):
+            names = ", ".join(sorted({n for n, _ in jobs})) or "none"
+            return ("text", f"Scheduled now: {names}.", None)
+        brief = [j for n, j in jobs if n == "Daily briefing"]
+        if step == 1:
+            if not brief:
+                return ("text", "SCRIPTED-BRAIN: no Daily briefing job in the list", None)
+            return automations(tools, {"action": "run", "jobId": brief[0], "runMode": "force"})
+        return ("text", "You already have the daily briefing; today's arrives here as its own message.", None)
+    if ask.lower().startswith("watch this hotkey") and HOTKEY.search(ask):
+        # The time zone: from the message, else from USER.md (N4: never asked again).
+        hk = HOTKEY.search(ask).group(1)
+        zone = ZONE.search(ask.split("hotkey", 1)[1].replace(hk, ""))
+        if zone:
+            zone = zone.group(1)
+        elif KNOWN_FIRST in system and USER_ZONE.search(system):
+            zone = USER_ZONE.search(system).group(1)
+        else:
+            return ("text", "What is your time zone?", None)
         watch = f"taoq hotkey {hk} --netuid 70 --watch --text"
         if step == 0:
-            return call_tool(tools, "exec", {"command": taoq_cmd(watch)})
+            if LIST_FIRST not in system:
+                return ("text", "SCRIPTED-BRAIN: AGENTS.md does not say to list the jobs first", None)
+            return automations(tools, {"action": "list"})
         if step == 1:
-            recipe = WATCH_SCRIPT.search(system)
-            if not recipe:
+            job = script_job(system, "Hotkey watch", "0 */6 * * *", zone, watch)
+            if not job:
                 return ("text", "SCRIPTED-BRAIN: no script recipe in the workspace files", None)
-            script = json.loads(recipe.group(1)).replace("<COMMAND>", taoq_cmd(watch))
-            job = {"name": "Hotkey watch", "schedule": {"kind": "cron", "expr": "0 */6 * * *", "tz": zone},
-                   "sessionTarget": "isolated", "payload": {"kind": "script", "script": script}}
-            return call_tool(tools, "automations", {"action": "add", "job": job}, "cron")
-        return ("text", f"{text_of(results[0].get('content')).strip()}\n\nScheduled: the hotkey watch every 6 hours. "
+            return automations(tools, {"action": "add", "job": job})
+        if step == 2:
+            jid = JOB_ID.search(text_of(results[1].get("content")))
+            return automations(tools, {"action": "run", "jobId": jid.group(0) if jid else "unknown", "runMode": "force"})
+        return ("text", f"Scheduled: the hotkey watch every 6 hours ({zone}); its first check arrives here as its own message. "
                         "Ask me to change or stop it.", None)
     if ask.lower().startswith(("run the daily briefing now", "run the hotkey watch now")):
         jid = JOB_ID.search(ask)

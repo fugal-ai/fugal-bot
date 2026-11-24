@@ -91,7 +91,7 @@ if [ "$BRAIN" = scripted ]; then
   # The chain tool in the first conversation: live (finney) or fixture (no network).
   SMOKE_TAOQ=${SMOKE_TAOQ:-live}
   # The news in the briefing always comes from the recorded feed answers (first-conversation.sh writes them).
-  export BRAIN_TAOQ_ENV="TAOQ_FEED_FIXTURE=/tmp/taoq-feed.json"
+  export BRAIN_TAOQ_ENV="TAOQ_RECORD=/tmp/taoq-record.json TAOQ_FEED_FIXTURE=/tmp/taoq-feed.json"
   [ "$SMOKE_TAOQ" = fixture ] && export BRAIN_TAOQ_ENV="$BRAIN_TAOQ_ENV TAOQ_FIXTURE=/tmp/taoq-fixture.json.gz TAOQ_ENDPOINTS=ws://127.0.0.1:9"
   export MODEL_INPUT=text MODEL_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false}}'
   export BACKGROUND_MODEL_USE=off TOOLS_DENY=
