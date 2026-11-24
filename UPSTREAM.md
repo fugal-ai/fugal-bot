@@ -9,23 +9,27 @@ pins upstream images by digest and adds configuration and small scripts.
 |---|---|
 | Project | OpenClaw, https://github.com/openclaw/openclaw |
 | Licence | MIT, "Copyright (c) 2026 OpenClaw Foundation" (full text: `upstream/OPENCLAW-LICENSE`) |
-| Release | `v2026.11.6` (stable, published 2026-11-19) |
-| Release commit | `06afb10d3272cc9deaf38ca6a3b7b839d5935638` (tag object `e780fed30f3a44ce38d61d26bc3cf8acc0b8066d`) |
-| Image | `ghcr.io/openclaw/openclaw@sha256:65e229536a2698f0ab211c8a3d1c5c8e2685d19379d153e95f93ff76f22779cf` (index; linux/amd64 manifest `sha256:ccb0d04f14edd04c201b85bcee4612e7c084158a3d8fafa77a3c78554587edca`) |
-| Checked | `openclaw --version` in the image prints `OpenClaw 2026.11.6 (06afb10)`; `/app/dist/build-info.json` records commit `06afb10d…5638` |
-| npm tarball of the same release | `openclaw@2026.11.6`, integrity `sha512-4MGjAMv8QlVrul3ZbCu8KjM7GhXfLdLzf0IrsO5QZ8LC3oYkduqs2rZiZpPDmTRpT6kXYke/OVaWrB+YmhBHLw==` |
+| Release | `v2026.11.7` (stable, published 2026-11-23) |
+| Release commit | `e31bbf056de321127988ec5c1a36ff1b59297de0` (tag object `de3c8f72b0a6d4fab04bf2f88c0f331d8410447a`) |
+| Image | `ghcr.io/openclaw/openclaw@sha256:461cc655301409901f2df11d6ec9f029f9709e4607826e9780fd74f8e1d12a16` (index; linux/amd64 manifest `sha256:9d74311eac69edf8f80c1349a12cceabbaf5241d36d62bdc3524e6feb56d982b`, linux/arm64 `sha256:fb0f19c9a2573cde08d944b950be32cfae416c145d28430fda10aae74d26739e`) |
+| Checked (2026-11-23) | the image's config labels name version `2026.11.7` and revision `e31bbf05…7de0`; its environment is the same six variables as before; the licence file is unchanged |
+| npm tarball of the same release | `openclaw@2026.11.7`, integrity `sha512-6x49d02jEj8jjQAEkSZpyX8BCNnJLLCV3IHUTxQuN+OEJepo7RODk8JHURivefy+WZMqzvsyp+p8DlZUQnub6w==` |
 
 ### Why this release
 
-- Newest stable release on 2026-11-22. `v2026.11.10-beta.1` is a prerelease;
-  it adds agent templates installed from ClawHub packages and automatic update
-  schedules, both of which we would switch off anyway.
-- GitHub security advisories for the repository (the 100 most recent, read
-  2026-11-22): the newest, GHSA-pw3x-g8v8-fvj2 ("delegation could skip
-  approval for restricted agents", high, published 2026-11-19), is fixed in
-  2026.10.33 and 2026.11.4, both older than 2026.11.6. Every other advisory in
-  that set names a patched version of 2026.9.3 or earlier. None lists 2026.11.6
-  as affected.
+- Newest stable release on 2026-11-23 (replaces v2026.11.6). Its notes add
+  fixes only for us (conversation recovery across restarts, automations,
+  dictation while microphone permission is pending, faster page switching);
+  the breaking changes are to the plugin SDK, which we do not use. Config
+  schema: the one change in `src/config/zod-schema*` is the default of
+  `tools.exec.notifyOnExitEmptySuccess` (now true). `v2026.11.10-beta.*` are
+  prereleases (agent templates from ClawHub, automatic update schedules, both
+  of which we would switch off anyway).
+- GitHub security advisories for the repository (read 2026-11-23): the
+  newest, GHSA-pw3x-g8v8-fvj2 ("delegation could skip approval for restricted
+  agents", high, published 2026-11-19), is fixed in 2026.10.33 and 2026.11.4.
+  Every other advisory names a patched version of 2026.9.3 or earlier. None
+  lists 2026.11.7 as affected.
 
 ### What we changed (all outside upstream's code)
 
@@ -83,7 +87,7 @@ the model's input kinds, extra request fields
 (`plugins.entries.memory-core.config.dreaming.enabled`), and a `tools.deny`
 list. All of these are upstream's documented config keys.
 
-Upstream behaviour we rely on and checked on v2026.11.6 (the smoke test
+Upstream behaviour we rely on and checked on v2026.11.6 (re-checked by the smoke test on each upgrade) (the smoke test
 checks each again, so an upgrade that changes one fails it):
 
 - A workspace that already holds the five files, with a `BOOTSTRAP.md` that
@@ -109,7 +113,7 @@ is reproducible by us, not only pinned.
 
 ### Updating
 
-1. Read the release notes and the security advisories since `v2026.11.6`.
+1. Read the release notes and the security advisories since `v2026.11.7`.
 2. `docker buildx imagetools inspect ghcr.io/openclaw/openclaw:<version>`; put
    the new index digest in `bot/Dockerfile` and the commit in this file. In
    the last stage of `bot/Dockerfile`, bring the copied environment

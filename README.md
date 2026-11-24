@@ -10,7 +10,7 @@ controls that host can read everything in it. Read "What is private today"
 below before you put anything sensitive in it.
 
 The agent is [OpenClaw](https://github.com/openclaw/openclaw) (MIT), pinned to
-release v2026.11.6 by image digest, with its marketplace, installs, update
+release v2026.11.7 by image digest, with its marketplace, installs, update
 checks and telemetry switched off. Details: `UPSTREAM.md`, `SECURITY-NOTES.md`.
 
 ## Quickstart

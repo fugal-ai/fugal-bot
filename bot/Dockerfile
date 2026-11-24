@@ -10,9 +10,9 @@
 #   - runtime config written by render-config.mjs (marketplace, installs,
 #     updates and telemetry off; model + channels from the environment).
 
-# OpenClaw v2026.11.6, release commit 06afb10d3272cc9deaf38ca6a3b7b839d5935638,
-# multi-arch index digest (amd64 manifest sha256:ccb0d04f...). MIT licence.
-ARG OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw@sha256:65e229536a2698f0ab211c8a3d1c5c8e2685d19379d153e95f93ff76f22779cf
+# OpenClaw v2026.11.7, release commit e31bbf056de321127988ec5c1a36ff1b59297de0,
+# multi-arch index digest (amd64 manifest sha256:9d74311e...). MIT licence.
+ARG OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw@sha256:461cc655301409901f2df11d6ec9f029f9709e4607826e9780fd74f8e1d12a16
 FROM ${OPENCLAW_IMAGE} AS prep
 
 USER root
@@ -152,14 +152,14 @@ RUN { echo "openclaw $(node -p 'require("/app/package.json").version')"; \
 LABEL org.opencontainers.image.title="fugal-bot" \
       org.opencontainers.image.revision="${GIT_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.description="Fugal Bot: an OpenClaw agent with its own Linux desktop, shell and Chromium (OpenClaw v2026.11.6 + desktop layers)" \
+      org.opencontainers.image.description="Fugal Bot: an OpenClaw agent with its own Linux desktop, shell and Chromium (OpenClaw v2026.11.7 + desktop layers)" \
       org.opencontainers.image.source="https://github.com/fugal-ai/fugal-bot" \
       org.opencontainers.image.url="https://github.com/fugal-ai/fugal-bot" \
       org.opencontainers.image.documentation="https://github.com/fugal-ai/fugal-bot" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="2026.11.6" \
-      org.opencontainers.image.base.name="ghcr.io/openclaw/openclaw:2026.11.6" \
-      org.opencontainers.image.base.digest="sha256:65e229536a2698f0ab211c8a3d1c5c8e2685d19379d153e95f93ff76f22779cf"
+      org.opencontainers.image.version="2026.11.7" \
+      org.opencontainers.image.base.name="ghcr.io/openclaw/openclaw:2026.11.7" \
+      org.opencontainers.image.base.digest="sha256:461cc655301409901f2df11d6ec9f029f9709e4607826e9780fd74f8e1d12a16"
 
 USER node
 WORKDIR /home/node
