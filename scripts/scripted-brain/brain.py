@@ -177,15 +177,24 @@ def jobs_in(result):
     found = []
 
     def walk(v):
+        # The result may be wrapped (dispatch_action: {"tool": {...}, "result": {"content":
+        # [{"text": "<the tool's JSON>"}]}}): JSON inside strings is read too, the wrapper's
+        # own "tool" entry is not a job.
         if isinstance(v, dict):
             jid = v.get("id") or v.get("jobId")
-            if isinstance(v.get("name"), str) and isinstance(jid, str):
+            if isinstance(v.get("name"), str) and isinstance(jid, str) and JOB_ID.fullmatch(jid):
                 found.append((v["name"], jid))
-            for x in v.values():
-                walk(x)
+            for k, x in v.items():
+                if k != "tool":
+                    walk(x)
         elif isinstance(v, list):
             for x in v:
                 walk(x)
+        elif isinstance(v, str) and v.lstrip()[:1] in ("{", "["):
+            try:
+                walk(json.loads(v))
+            except ValueError:
+                pass
     try:
         walk(json.loads(text))
     except ValueError:

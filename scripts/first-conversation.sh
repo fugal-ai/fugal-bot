@@ -292,12 +292,15 @@ sys.exit(0 if ok else 1)' "$texts" "$want"
 }
 
 # N1: what is scheduled comes from the automations list, never from memory or a
-# guess, and an existing job is used, not made twice. Asked in new conversations.
+# guess, and an existing job is used, not made twice. Asked in the conversation
+# that made the job: through /v1/chat/completions (this test's way in) a model
+# turn sees only its own conversation's jobs; a Control UI turn of the owner
+# (operator.admin) sees and manages every job of the bot.
 known_jobs() {
   step "existing jobs (scripted model): listed before answering, a briefing asked for again runs the existing job, no duplicate"
   local reply n0 n1 turn r0 r1 count
   n0=$(brain_log | grep -a -c '\[brain\] -> ')
-  reply=$(chat fc-jobs "Which automations do I have?")
+  reply=$(chat first-run "Which automations do I have?")
   n1=$(brain_log | grep -a -c '\[brain\] -> ')
   turn=$(brain_log | grep -a '\[brain\] -> ' | tail -n "$((n1 - n0))")
   echo "reply: $reply"
@@ -305,7 +308,7 @@ known_jobs() {
     bash -c '[[ "$0" == *"Daily briefing"* ]] && [ "$2" = 2 ] && [ "$(grep -a -c -E -- "-> (automations|cron|dispatch_action) .*\"action\": \"list\"" <<< "$1")" = 1 ]' "$reply" "$turn" "$((n1 - n0))"
   r0=$(fc_rows "Stake report for")
   n0=$(brain_log | grep -a -c '\[brain\] -> ')
-  reply=$(chat fc-again "Send me a daily briefing")
+  reply=$(chat first-run "Send me a daily briefing")
   n1=$(brain_log | grep -a -c '\[brain\] -> ')
   turn=$(brain_log | grep -a '\[brain\] -> ' | tail -n "$((n1 - n0))")
   echo "reply: $reply"
@@ -425,7 +428,7 @@ sys.exit(0 if ok else 1)' "${job:-{\}}" "$hk"
   at0=$(fc_watch_state "$state")
   u0=$(usage); c0=$(fc_calls); r0=$(fc_rows "RESOLVED (was warning)")
   local asks=1
-  reply=$(chat first-run "Run the hotkey watch now: job $wid")
+  reply=$(chat fc-watch "Run the hotkey watch now: job $wid")
   echo "reply: ${reply:0:240}"
   check "the automations tool queued the run" bash -c '[[ "$0" == *"SCRIPTED-BRAIN RUN-NOW"* && "$0" == *enqueued* ]]' "$reply"
   at1=$(fc_wait_state_change "$state" "$at0") || true
@@ -434,7 +437,7 @@ sys.exit(0 if ok else 1)' "${job:-{\}}" "$hk"
     if [[ "$job" == *"Plugin runtime changed"* ]]; then
       echo "NOTE: the first script run after the gateway started failed with OpenClaw's 'Plugin runtime changed' (known; the next run works): running it again"
       asks=2
-      reply=$(chat first-run "Run the hotkey watch now: job $wid")
+      reply=$(chat fc-watch "Run the hotkey watch now: job $wid")
       at1=$(fc_wait_state_change "$state" "$at0") || true
     fi
   fi
@@ -456,7 +459,7 @@ sys.exit(0 if st.get("lastRunStatus", st.get("lastStatus")) == "ok" else 1)' "${
   fc_watch_plant "$state"
   at0=$(fc_watch_state "$state")
   u2=$(usage); c2=$(fc_calls)
-  reply=$(chat first-run "Run the hotkey watch now: job $wid")
+  reply=$(chat fc-watch "Run the hotkey watch now: job $wid")
   at1=$(fc_wait_state_change "$state" "$at0") || true
   check "the second run saved its check ($at0 -> $at1)" test -n "$at1" -a "$at1" != "$at0"
   sleep 3
