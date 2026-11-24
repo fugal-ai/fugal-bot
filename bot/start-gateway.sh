@@ -54,4 +54,7 @@ if [ -z "$image" ] || [ "$done_by" != "$image" ]; then
 else
   echo "[fugal-bot] openclaw doctor: already run by this image on this data directory, skipped"
 fi
+# The owner's name in the web UI: their short wallet address instead of the
+# sign-in id "owner" (owner-name.mjs; while the gateway is stopped, never fatal).
+node --no-warnings /opt/fugal-bot/owner-name.mjs || true
 exec node /app/openclaw.mjs gateway --bind "${GATEWAY_BIND:-lan}" --port 18789

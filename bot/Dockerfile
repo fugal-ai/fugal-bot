@@ -10,9 +10,9 @@
 #   - runtime config written by render-config.mjs (marketplace, installs,
 #     updates and telemetry off; model + channels from the environment).
 
-# OpenClaw v2026.11.6, release commit 06afb10d3272cc9deaf38ca6a3b7b839d5935638,
-# multi-arch index digest (amd64 manifest sha256:ccb0d04f...). MIT licence.
-ARG OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw@sha256:65e229536a2698f0ab211c8a3d1c5c8e2685d19379d153e95f93ff76f22779cf
+# OpenClaw v2026.11.7, release commit e31bbf056de321127988ec5c1a36ff1b59297de0,
+# multi-arch index digest (amd64 manifest sha256:9d74311e...). MIT licence.
+ARG OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw@sha256:461cc655301409901f2df11d6ec9f029f9709e4607826e9780fd74f8e1d12a16
 FROM ${OPENCLAW_IMAGE} AS prep
 
 USER root
@@ -30,6 +30,15 @@ RUN apt-get update \
 # and install third-party skills). Installs are also blocked by config.
 RUN rm -rf /app/skills/clawhub \
  && install -d -m 1777 /tmp/.X11-unix
+
+# Checked patches of OpenClaw's built files: things that cannot work in a hosted
+# bot and that no config setting hides or rewords (the plugin marketplace's
+# error, the backup command hint, the automation default that never reached
+# the web chat, the microphone with no speech-to-text provider). Each is an
+# exact string that must occur exactly once, or the build stops here (see the
+# script). The script itself is not kept in the image.
+COPY --chown=root:root patch-openclaw.mjs /tmp/patch-openclaw.mjs
+RUN node /tmp/patch-openclaw.mjs /app && rm -f /tmp/patch-openclaw.mjs
 
 # Backups (backup.sh / restore.sh): age encrypts the archive to a public key,
 # curl moves it. Debian trixie packages like the ones above, under the same
@@ -65,7 +74,7 @@ RUN pip_whl=/tmp/pip-26.3-py3-none-any.whl \
  && ! "$venv/bin/python3" -I -c 'import pip' 2>/dev/null
 
 COPY --chown=root:root supervisord.conf /etc/fugal-bot/supervisord.conf
-COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs seed-history.json healthcheck.sh start-gateway.sh backup.sh restore.sh /opt/fugal-bot/
+COPY --chown=root:root entrypoint.sh render-config.mjs seed-workspace.mjs owner-name.mjs seed-history.json healthcheck.sh start-gateway.sh backup.sh restore.sh /opt/fugal-bot/
 COPY --chown=root:root seed/ /opt/fugal-bot/seed/
 COPY --chown=root:root skills/ /opt/fugal-bot/skills/
 COPY --chown=root:root tools/taoq.py /opt/fugal-bot/tools/taoq.py
@@ -152,14 +161,14 @@ RUN { echo "openclaw $(node -p 'require("/app/package.json").version')"; \
 LABEL org.opencontainers.image.title="fugal-bot" \
       org.opencontainers.image.revision="${GIT_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.description="Fugal Bot: an OpenClaw agent with its own Linux desktop, shell and Chromium (OpenClaw v2026.11.6 + desktop layers)" \
+      org.opencontainers.image.description="Fugal Bot: an OpenClaw agent with its own Linux desktop, shell and Chromium (OpenClaw v2026.11.7 + desktop layers)" \
       org.opencontainers.image.source="https://github.com/fugal-ai/fugal-bot" \
       org.opencontainers.image.url="https://github.com/fugal-ai/fugal-bot" \
       org.opencontainers.image.documentation="https://github.com/fugal-ai/fugal-bot" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="2026.11.6" \
-      org.opencontainers.image.base.name="ghcr.io/openclaw/openclaw:2026.11.6" \
-      org.opencontainers.image.base.digest="sha256:65e229536a2698f0ab211c8a3d1c5c8e2685d19379d153e95f93ff76f22779cf"
+      org.opencontainers.image.version="2026.11.7" \
+      org.opencontainers.image.base.name="ghcr.io/openclaw/openclaw:2026.11.7" \
+      org.opencontainers.image.base.digest="sha256:461cc655301409901f2df11d6ec9f029f9709e4607826e9780fd74f8e1d12a16"
 
 USER node
 WORKDIR /home/node

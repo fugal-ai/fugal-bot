@@ -133,6 +133,12 @@ ${SITE} {
 		# through unchanged and the gateway rejects them.
 		@sameorigin expression \`{http.request.header.Origin} == "https://" + {http.request.hostport} || {http.request.header.Origin} == "http://" + {http.request.hostport}\`
 		request_header @sameorigin Origin "${UI_ORIGIN}"
+		# Profile pictures: the owner's profile has none (its only "email" is the
+		# sign-in id), so the gateway answered 503 on every page load, or would
+		# look the id up on gravatar.com. 404 is the UI's "no picture: show
+		# initials". Answered only after the gate let the request through.
+		@userAvatar path_regexp ^/api/users/[^/]+/avatar$
+		respond @userAvatar 404
 		# The bot's desktop (noVNC + websocket), watch and take over.
 		redir /desktop /desktop/ 308
 		handle_path /desktop/* {

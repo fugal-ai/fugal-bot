@@ -50,6 +50,12 @@ jobs:
       - name: Unit tests (seed files)
         run: node bot/test_seed.mjs
 
+      # Node only, no network: the checked patch engine for OpenClaw's built
+      # files and the owner-name rename (that part needs node:sqlite; skipped
+      # on an older Node). The real patch list is applied in the image build.
+      - name: Unit tests (OpenClaw patches, owner name)
+        run: node bot/test_patches.mjs
+
       # Stdlib only, no network: replays a recorded finney read (bot/tools/fixtures).
       - name: Unit tests (chain tool, taoq)
         run: python3 -I bot/tools/test_taoq.py
