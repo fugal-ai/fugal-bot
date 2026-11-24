@@ -82,8 +82,12 @@ jobs:
           set +e -u
           set -a; . ../bundle/images.env; set +a
           mkdir -p "$RUNNER_TEMP/log"
-          scripts/hosted-test.sh --no-build 2>&1 | tee "$RUNNER_TEMP/log/hosted-test.log"
+          scripts/hosted-test.sh --no-build --keep 2>&1 | tee "$RUNNER_TEMP/log/hosted-test.log"
           rc=${PIPESTATUS[0]}
+          # --keep leaves the containers up: their logs go into the log artifact.
+          for c in $(docker ps -a --filter label=com.docker.compose.project=fugal-bot-hostedtest --format '{{.Names}}'); do
+            { echo; echo "=================== docker logs $c"; docker logs --tail 400 "$c" 2>&1; } >> "$RUNNER_TEMP/log/containers.log"
+          done
           {
             echo "### hosted-test against images run $IMAGES_RUN (exit $rc)"
             echo
@@ -97,5 +101,5 @@ jobs:
         if: always()
         with:
           name: hosted-test-log-${{ env.IMAGES_RUN }}
-          path: ${{ runner.temp }}/log/hosted-test.log
+          path: ${{ runner.temp }}/log/
           if-no-files-found: warn
