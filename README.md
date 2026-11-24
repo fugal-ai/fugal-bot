@@ -133,8 +133,8 @@ Set in `.env`, applied by `bot/render-config.mjs` at every start:
   that cannot work in this package (paired devices, voice and meeting capture,
   publishing to GitHub, plugin installs, self-written skills, portals: an app
   preview needs a private wildcard HTTPS ingress that a hosted bot behind one
-  hostname does not have; OpenClaw v2026.11.6 has no switch that hides the
-  Portals page itself).
+  hostname does not have; OpenClaw has no switch that hides the Portals page
+  itself).
 - `TZ` (an IANA name; the controller passes the owner's browser zone) is also
   written to `agents.defaults.userTimezone`, the agent's local time. The
   Automations form's grey "America/Los_Angeles" is only OpenClaw's placeholder;
@@ -173,6 +173,40 @@ thrown-away attempts as `discarded_*`, never billed to the bot): see
 defence: AGENTS.md sends chain questions to `taoq` (also when the user names
 a site such as taostats.io, which shows automated browsers a bot check), and
 tells the agent to stop after a few fruitless steps and say what went wrong.
+
+## The web UI in a hosted bot
+
+Changes to OpenClaw's Control UI for a bot that has no marketplace, no
+channels of its own and no speech-to-text provider (OpenClaw v2026.11.7):
+
+- Config: an Activity recap per finished run, on the chat model
+  (`agents.defaults.utilityModel`; OpenClaw finds no small model for a custom
+  provider, so every recap said "Recap unavailable"). About 0.0005 USD a call
+  on DeepSeek V4 Flash. `ACTIVITY_RECAP=off` turns it off. The live session
+  observer stays off.
+- Checked patches of the built files (`bot/patch-openclaw.mjs`, applied in the
+  image build, which stops if any patched text has changed upstream): the
+  Plugins page shows installed plugins without the marketplace's "fetch
+  failed" error; Systems > Backups says Fugal backs the bot up instead of
+  showing a command; a new automation runs in the main session, so its result
+  appears in the chat (it used to run apart with no delivery, and announcing
+  needs a channel: "Channel is required"); the microphone button is hidden
+  (dictation and Talk need a speech-to-text provider).
+- The owner's name: the sign-in id stays "owner" (the trusted-proxy
+  allowlist); the profile's display name becomes the short wallet address
+  (`OWNER_WALLET_SS58`) or "You", at the gateway start after the first sign-in
+  (`bot/owner-name.mjs`). A name set under Settings > Profile is kept.
+- Profile pictures: the proxy answers `/api/users/<id>/avatar` with 404 (the
+  UI shows initials). The gateway answered 503, or looked the sign-in id up on
+  gravatar.com.
+- The main conversation is the Home button (house icon, bottom of the
+  sidebar; Mod+Shift+H). OpenClaw never lists it among the sessions.
+- "Healthy" now also waits for OpenClaw's reply runtime to be loaded
+  (`/readyz` `coreReady`), so the first message of a new bot does not wait for
+  it. After 10 minutes `/startupz` alone counts, as before.
+- A first visit loads about 100 files (OpenClaw's UI is split into many small
+  files); they are compressed and cached by the browser as immutable, so later
+  visits fetch few of them.
 
 ## Name, look and first conversation
 

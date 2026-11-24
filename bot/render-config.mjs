@@ -241,6 +241,17 @@ const managed = {
   agents: {
     defaults: {
       model: { primary: modelRef },
+      // The "utility model" for short internal tasks. OpenClaw picks one only
+      // for providers whose plugin declares a small model; for this custom
+      // provider it found none, so the Activity page said "Recap unavailable"
+      // on every session. Same model as the chat, no fallbacks (titles then
+      // stay one call, as before). What it adds (read in v2026.11.7): one
+      // Activity recap per finished run, at most 240 tokens out, only the
+      // messages since the last recap in (each cut to 800 characters), about
+      // 0.0005 USD a call on DeepSeek V4 Flash, a few % of the chat's own
+      // cost. The live session observer stays off (gateway.controlUi above).
+      // ACTIVITY_RECAP=off: no utility model at all ("" disables it).
+      utilityModel: (env.ACTIVITY_RECAP || "").trim().toLowerCase() === "off" ? "" : { primary: modelRef },
       workspace: env.OPENCLAW_WORKSPACE_DIR || "/home/node/workspace",
       ...(userTimezone ? { userTimezone } : {}),
     },
