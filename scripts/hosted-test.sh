@@ -643,12 +643,12 @@ calls=
 for _ in $(seq 1 60); do calls=$(tg "$TG/test/calls"); [[ "$calls" == *getUpdates* ]] && break; sleep 2; done
 check "the Telegram channel polls the stand-in Bot API ($calls)" bash -c '[[ "$0" == *getMe* && "$0" == *getUpdates* ]]' "$calls"
 ASK_TG="Watch the SN70 champion for me"
-asked() { brain_log | grep -a -c 'SN70 champion'; }
+asked() { brain_log | grep -a -c 'champion-watch step='; }   # the scripted model's turns on this request
 a0=$(asked)
 tg -X POST --data-binary "$ASK_TG" "$TG/test/message?from=$TG_OTHER" >/dev/null
 sleep 25
 a1=$(asked)
-check "a Telegram user not on the allowlist reaches no model ($((a1 - a0)) calls with the request) and makes no job" \
+check "a Telegram user not on the allowlist reaches no model ($((a1 - a0)) model calls on the request) and makes no job" \
   bash -c '[ "$0" = 0 ] && ! grep -q "\"name\":\"Champion watch\"" <<< "$1"' "$((a1 - a0))" "$(fc_job)"
 tg -X POST --data-binary "$ASK_TG" "$TG/test/message?from=$TG_OWNER" >/dev/null
 sent=
@@ -670,7 +670,7 @@ ok = (j["enabled"] in (1, True) and s.get("kind") == "cron" and s.get("expr") ==
 sys.exit(0 if ok else 1)' "${cjob:-null}"
 check "the reply went back to the owner on Telegram, and it is not a refusal (no \"owner's authority\")" \
   bash -c '[[ "$0" == *"Scheduled: the SN70 champion watch"* && "$0" != *"authority"* && "$0" != *SCRIPTED-BRAIN* ]]' "$tgreply"
-check "the scripted model was asked once for it, on the owner's message only ($(( $(asked) - a1 )) request lines)" test "$(( $(asked) - a1 ))" -ge 1
+check "the owner's message reached the model: $(( $(asked) - a1 )) model call(s) on it (list, add, reply)" test "$(( $(asked) - a1 ))" -ge 1
 uidsout=$(bot_sh 'cat > /tmp/taoq-uids.json.gz' < bot/tools/fixtures/finney-uids.json.gz; bot_sh 'TAOQ_FIXTURE=/tmp/taoq-uids.json.gz TAOQ_ENDPOINTS=ws://127.0.0.1:9 taoq uids 70 --text --no-save' 2>&1)
 echo "$uidsout" | head -3 | cut -c1-200 | sed 's/^/    /'
 check "taoq uids runs in the image (recorded read): the SN70 leader is named" bash -c '[[ "$0" == "SN70 Fugal"* && "$0" == *"Leader (most incentive"* ]]' "$uidsout"

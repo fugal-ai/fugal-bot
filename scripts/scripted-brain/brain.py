@@ -322,6 +322,7 @@ def first_conversation(ask, system, tools, results):
         # Asked on Telegram (scripts/hosted-test.sh, a stand-in Bot API): the
         # champion watch from AGENTS.md, made with the automations tool. A
         # refusal is passed on as it came, so the test sees it.
+        log(f"champion-watch step={step}")
         if not CHAMPION_JOB.search(system):
             return ("text", "SCRIPTED-BRAIN: no champion watch recipe in AGENTS.md", None)
         zone = USER_ZONE.search(system)
