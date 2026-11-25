@@ -8,7 +8,9 @@ prints one line of JSON (or, with --text, a short report for a person).
     taoq stake <coldkey>            stake positions, values, change since the last run, flags
     taoq subnet <netuid>...         price, pool, emission, neurons, registration cost, owner, links
     taoq hotkey <hotkey> [--netuid N]   a miner's / validator's standing on each subnet, deregistration risk
-    taoq hotkey|subnet ... --watch  the same, for a scheduled job: only what is new, worse or resolved
+    taoq uids <netuid> [--top N] [--sort incentive|emission|stake|dividends] [--miners|--validators] [--uid U]
+                                    every uid of a subnet, the leader (champion) by incentive, concentration
+    taoq hotkey|subnet|uids ... --watch  the same, for a scheduled job: only what is new, worse or resolved
                                     (subnet --watch --news: plus the shared feed's new items for those subnets)
     taoq week                       price movers, new subnets, emission changes over about 7 days
     taoq subnet-brief <netuid>      the on-chain facts for a deep dive on one subnet
@@ -1249,6 +1251,317 @@ def cmd_hotkey(args):
     return w, lambda o: watch_text(o, f"Hotkey watch {short(hk)}", text(out))
 
 
+# ---- uids: every neuron of one subnet ---------------------------------------------
+# One runtime call (SubnetInfoRuntimeApi.get_metagraph) gives every uid's
+# hotkey, coldkey, incentive, dividends, emission, stake, permit and
+# registration; no per-uid calls. The "leader" is the neuron with the most
+# incentive that is not the subnet owner's own hotkey (on a winner-take-all
+# subnet: the champion); a role is "validator" for a permit holder that earns
+# more dividends than incentive (or neither), else "miner".
+UIDS_SORT = {"incentive": "incentives", "emission": "emission", "stake": "total_stake", "dividends": "dividends"}
+UIDS_TEXT_MAX = 3000          # hard cap on `taoq uids --text` (characters)
+
+
+def _at(mg: dict, key: str, u: int):
+    """mg[key][u], or None when the runtime's answer has no such list (or a short one)."""
+    v = mg.get(key)
+    return v[u] if isinstance(v, list) and u < len(v) else None
+
+
+async def _uids_reads(r: Reader, n: int):
+    subnets = await read_subnets(r)
+    if n not in subnets:
+        raise Usage(f"no such subnet: SN{n}")
+    g = await _metagraph_extras(r, n)
+    if not isinstance(g["mg"], dict) or not g["mg"].get("hotkeys"):
+        raise Unreadable(f"SN{n}: the chain returned no metagraph")
+    return {"subnets": subnets, "g": g}
+
+
+def _role(permit, inc, div) -> str:
+    return "validator" if permit and (div or 0) >= (inc or 0) else "miner"
+
+
+def incentive_ranks(mg: dict) -> dict:
+    """uid -> 1-based rank by incentive (ties share a rank); uids with no incentive are not ranked."""
+    inc = mg.get("incentives") or []
+    vals = sorted((int(x) for x in inc if x), reverse=True)
+    first = {}
+    for i, x in enumerate(vals):
+        first.setdefault(x, i + 1)
+    return {u: first[int(x)] for u, x in enumerate(inc) if x}
+
+
+def uid_row(mg: dict, u: int, block: int, per_day: Decimal, immortal: set, ranks: dict, unread: set) -> dict:
+    def get(key):
+        v = _at(mg, key, u)
+        if v is None:
+            unread.add(key)
+        return v
+    hk = get("hotkeys")
+    inc, div = get("incentives"), get("dividends")
+    permit = get("validator_permit")
+    em = tao(get("emission"))
+    reg = get("block_at_registration")
+    last = get("last_update")
+    imm = mg.get("immunity_period")
+    ids = mg.get("identities") or []
+    ident = ids[u] if u < len(ids) and isinstance(ids[u], dict) else None
+    return {
+        "uid": u, "hotkey": hk, "hotkey_short": short(hk) if hk else None, "coldkey": get("coldkeys"),
+        "name": text_of(ident.get("name")) if ident else None,
+        "role": _role(permit, inc, div), "validator_permit": None if permit is None else bool(permit),
+        "active": None if _at(mg, "active", u) is None else bool(mg["active"][u]),
+        "owner_hotkey": hk is not None and hk == mg.get("owner_hotkey"),
+        "incentive": frac(inc), "incentive_rank": ranks.get(u),
+        "dividends": frac(div), "consensus": frac(_at(mg, "consensus", u)),
+        "emission_alpha_per_epoch": em, "emission_alpha_per_day": q9(em * per_day) if em is not None else None,
+        "stake_alpha": tao(get("alpha_stake")), "stake_tao_root": tao(get("tao_stake")), "stake_weight": tao(get("total_stake")),
+        "registered_at_block": reg,
+        "immune": None if reg is None or imm is None else block - int(reg) < int(imm),
+        "immunity_blocks_left": None if reg is None or imm is None else max(0, int(imm) - (block - int(reg))),
+        "owner_immortal": u in immortal,
+        "last_weights_block": last or None,
+        "blocks_since_weights": (block - int(last)) if last else None,
+    }
+
+
+def uids_report(n: int, reads: dict, block: int, t_now: float, sort: str, role: str | None, top: int, only: list[int]) -> tuple[dict, list]:
+    """(the report, every uid's row)."""
+    sn = reads["subnets"][n]
+    g = reads["g"]
+    mg = g["mg"]
+    size = len(mg["hotkeys"])
+    tempo = int(mg.get("tempo") or sn["tempo"])
+    per_day = Decimal(BLOCKS_PER_DAY) / (tempo + 1)
+    price = price_of(sn)
+    unread: set = set()
+    try:
+        immortal = immortal_uids(mg, int(g["owner_limit"] or 0))
+    except (KeyError, TypeError, ValueError, IndexError):
+        immortal = set()
+        unread.add("owner immortal uids")
+    ranks = incentive_ranks(mg)
+    rows = [uid_row(mg, u, block, per_day, immortal, ranks, unread) for u in range(size)]
+    bad = [u for u in only if not 0 <= u < size]
+    if bad:
+        raise Usage(f"SN{n} has uids 0 to {size - 1}; no uid {bad[0]}")
+
+    inc = [int(x or 0) for x in (mg.get("incentives") or [0] * size)]
+    contenders = [x for x in rows if not x["owner_hotkey"] and x["incentive"]]
+    contenders.sort(key=lambda x: (-inc[x["uid"]], x["uid"]))
+    miners_earning = [x for x in rows if x["role"] == "miner" and x["incentive"]]
+    leader = None
+    if contenders:
+        lx = contenders[0]
+        lx_day = lx["emission_alpha_per_day"]
+        leader = {k: lx[k] for k in ("uid", "hotkey", "hotkey_short", "coldkey", "role", "incentive", "emission_alpha_per_day",
+                                     "registered_at_block", "immune")}
+        leader["emission_tao_per_day_at_price"] = q9(lx_day * price) if lx_day is not None and price is not None else None
+        leader["days_registered"] = round((block - int(lx["registered_at_block"])) / BLOCKS_PER_DAY, 1) if lx["registered_at_block"] else None
+        leader["tied_with"] = [x["uid"] for x in contenders[1:] if inc[x["uid"]] == inc[lx["uid"]]]
+        second = next((x for x in contenders[1:] if inc[x["uid"]] < inc[lx["uid"]]), None)
+        leader["runner_up"] = None if second is None else {"uid": second["uid"], "hotkey_short": second["hotkey_short"], "incentive": second["incentive"]}
+    total = sum(inc) or 0
+
+    def share(xs):
+        return (Decimal(sum(inc[x["uid"]] for x in xs)) / U16).quantize(Decimal("0.0001")) if total else None
+    by_ck: dict = {}
+    for x in contenders:
+        by_ck[x["coldkey"]] = by_ck.get(x["coldkey"], 0) + inc[x["uid"]]
+    top_ck = max(by_ck.items(), key=lambda kv: (kv[1], kv[0] or "")) if by_ck else None
+    owner_inc = sum(inc[x["uid"]] for x in rows if x["owner_hotkey"])
+    conc = {
+        "neurons_with_incentive": sum(1 for x in inc if x),
+        "top1_share": share(contenders[:1]), "top3_share": share(contenders[:3]), "top10_share": share(contenders[:10]),
+        "distinct_coldkeys_earning": len(by_ck),
+        "top_coldkey": None if not top_ck else {"coldkey": top_ck[0], "uids": sum(1 for x in contenders if x["coldkey"] == top_ck[0]),
+                                                "share": (Decimal(top_ck[1]) / U16).quantize(Decimal("0.0001"))},
+        "owner_hotkey_share": (Decimal(owner_inc) / U16).quantize(Decimal("0.0001")) if total else None,
+        "basis": "fractions of the subnet's total incentive (the chain's u16 / 65535); the owner's own hotkey is left out of the top-N shares",
+    }
+
+    key = UIDS_SORT[sort]
+    pick = [x for x in rows if role is None or x["role"] == role]
+    if top > 0:        # a top-N list leaves out the uids with none of what it is sorted by
+        pick = [x for x in pick if int(_at(mg, key, x["uid"]) or 0) > 0]
+    pick.sort(key=lambda x: (-int(_at(mg, key, x["uid"]) or 0), x["uid"]))
+    shown = pick if top <= 0 else pick[:top]
+    seen = {x["uid"] for x in shown}
+    shown += [rows[u] for u in only if u not in seen]
+    out = {"ok": True, "command": "uids", **head_dict(block, t_now),
+           "netuid": n, "subnet": sn["name"], "symbol": sn["symbol"], "price": q9(price), "tempo": tempo,
+           "neurons": size, "max_neurons": mg.get("max_uids"), "immunity_period_blocks": mg.get("immunity_period"),
+           "validators": sum(1 for x in rows if x["role"] == "validator"),
+           "validators_with_permit": sum(1 for x in rows if x["validator_permit"]),
+           "miners": sum(1 for x in rows if x["role"] == "miner"), "miners_earning": len(miners_earning),
+           "leader": leader, "concentration": conc,
+           "sort": sort, "filter": role, "listed": len(shown), "matching": len(pick),
+           "matching_means": "uids of that role with more than 0 of the sort key" if top > 0 else "every uid of that role",
+           "uids": shown,
+           "fields": "incentive, dividends, consensus: fractions 0..1 of the subnet total; incentive_rank 1 = most incentive (null: none); "
+                     "emission: alpha to the uid at its last epoch, per day = x 7200 / (tempo + 1); stake_alpha on this subnet, "
+                     "stake_tao_root on root, stake_weight the chain's combined weight (alpha units); blocks: about 12 s each"}
+    if unread:
+        out["unread"] = sorted(unread)
+    return out, rows
+
+
+def _row_text(x: dict, block: int) -> str:
+    who = x["hotkey_short"] or "?"
+    if x["name"]:
+        who += f" {x['name'][:24]}"
+    if x["owner_hotkey"]:
+        who += " (subnet owner)"
+    head = f"uid {x['uid']} {who} {x['role']}"
+    if x["role"] == "validator":
+        w = f", weights {x['blocks_since_weights']} blocks ago" if x["blocks_since_weights"] is not None else ""
+        body = f"div {fmt(x['dividends'])}, {fmt(x['emission_alpha_per_day'], 2)} α/day, stake weight {fmt(x['stake_weight'], 0)} α{w}"
+    else:
+        rk = f" (#{x['incentive_rank']})" if x["incentive_rank"] else ""
+        body = f"inc {fmt(x['incentive'])}{rk}, {fmt(x['emission_alpha_per_day'], 2)} α/day, coldkey {short(x['coldkey'])}"
+    if x["immune"]:
+        body += ", immune"
+    elif x["registered_at_block"]:
+        body += f", {round((block - int(x['registered_at_block'])) / BLOCKS_PER_DAY, 1)} d old"
+    return f"- {head}: {body}"
+
+
+def uids_text(o: dict) -> str:
+    c = o["concentration"]
+    lines = [f"SN{o['netuid']} {o['subnet'] or ''} (block {o['block']}): {o['neurons']}/{o['max_neurons']} neurons, "
+             f"{o['validators']} validators, {o['miners_earning']} of {o['miners']} miners earning, price {fmt(o['price'], 6)} TAO/α"]
+    ld = o["leader"]
+    if ld:
+        tied = f"; tied with uid {', '.join(map(str, ld['tied_with']))}" if ld["tied_with"] else ""
+        ru = ld["runner_up"]
+        ru_t = f"; next uid {ru['uid']} with {fmt(ru['incentive'])}" if ru else "; nobody else earns incentive"
+        tao_d = f" (about {fmt(ld['emission_tao_per_day_at_price'], 2)} TAO/day at this price)" if ld["emission_tao_per_day_at_price"] is not None else ""
+        lines.append(f"Leader (most incentive, the owner's own hotkey left out): uid {ld['uid']} {ld['hotkey_short']} ({ld['role']}), "
+                     f"coldkey {short(ld['coldkey'])}, incentive {fmt(ld['incentive'])}, {fmt(ld['emission_alpha_per_day'], 2)} α/day{tao_d}, "
+                     f"registered {ld['days_registered']} d ago{tied}{ru_t}")
+    else:
+        lines.append("Leader: none (no neuron other than the owner's hotkey earns incentive)")
+    tc = c["top_coldkey"]
+    def p(x):
+        return "n/a" if x is None else f"{_num((x * 100).quantize(Decimal('0.1')))}%"
+    lines.append(f"Incentive held by the top 1: {p(c['top1_share'])}, top 3: {p(c['top3_share'])}, top 10: {p(c['top10_share'])}; "
+                 f"coldkeys earning: {c['distinct_coldkeys_earning']}" + (f", the largest {short(tc['coldkey'])} {p(tc['share'])} over {tc['uids']} uid(s)" if tc else "")
+                 + (f"; the owner's own hotkey {p(c['owner_hotkey_share'])}" if c["owner_hotkey_share"] else ""))
+    flt = f" {o['filter']}s" if o["filter"] else ""
+    lines.append(f"Top {o['listed']}{flt} by {o['sort']} ({o['matching']} with any):" if o["listed"] < o["neurons"] else f"All {o['listed']}{flt} uids by {o['sort']}:")
+    body = [_row_text(x, o["block"]) for x in o["uids"]]
+    used = sum(len(s) + 1 for s in lines)
+    for i, s in enumerate(body):
+        if used + len(s) + 1 > UIDS_TEXT_MAX - 60:
+            lines.append(f"... {len(body) - i} more not shown (use --top or the JSON output)")
+            break
+        lines.append(s)
+        used += len(s) + 1
+    if o.get("unread"):
+        lines.append("Could not read: " + ", ".join(o["unread"]))
+    return "\n".join(lines)
+
+
+def uids_watch(o: dict, rows: list, watched: list[int], prev: dict | None, rank_move: int) -> tuple[dict, dict]:
+    """(findings, memo). All findings are events: the leader changed; a watched
+    uid's incentive rank moved by rank_move places or more since it was last
+    reported (or it started or stopped earning); a watched uid now holds another
+    hotkey. The first check records the state."""
+    n = o["netuid"]
+    memo_prev = (prev or {}).get("memo") or {}
+    by_uid = {x["uid"]: x for x in rows}
+    found = {}
+    ld = o["leader"]
+    old = memo_prev.get("leader")
+    cur = {"uid": ld["uid"], "hotkey": ld["hotkey"]} if ld else None
+    # A tie at the top keeps the earlier leader: no alert for a coin flip.
+    if ld and old and old.get("hotkey") != ld["hotkey"]:
+        tied = {ld["uid"], *ld["tied_with"]}
+        if old.get("uid") in tied and by_uid.get(old["uid"], {}).get("hotkey") == old.get("hotkey"):
+            cur = {"uid": old["uid"], "hotkey": old["hotkey"]}
+    if prev is not None and (old or {}).get("hotkey") != (cur or {}).get("hotkey"):
+        if cur is None:
+            text = f"SN{n}: no miner earns incentive any more (uid {old['uid']} {short(old['hotkey'])} led before)"
+        else:
+            was = (f"was uid {old['uid']} {short(old['hotkey'])}" if old else "nobody led before")
+            if old and old["uid"] in by_uid and by_uid[old["uid"]]["hotkey"] == old["hotkey"]:
+                ox = by_uid[old["uid"]]
+                was += f", now incentive {fmt(ox['incentive'])}" + (f" (#{ox['incentive_rank']})" if ox["incentive_rank"] else "")
+            elif old:
+                was += ", no longer registered at that uid"
+            text = (f"SN{n}: new leader uid {cur['uid']} {short(cur['hotkey'])} (coldkey {short(ld['coldkey'])}), "
+                    f"incentive {fmt(ld['incentive'])}; {was}")
+        found[f"leader_changed:SN{n}"] = {"severity": "warning", "event": True, "text": text,
+                                          "data": {"leader": cur, "previous": old}}
+    memo = {"leader": cur, "watched": {}}
+    old_w = memo_prev.get("watched") or {}
+    for u in watched:
+        x = by_uid[u]
+        base = old_w.get(str(u))
+        rank = x["incentive_rank"]
+        keep = {"hotkey": x["hotkey"], "rank": rank}
+        if prev is not None and isinstance(base, dict):
+            if base.get("hotkey") != x["hotkey"]:
+                found[f"uid_replaced:SN{n}:{u}"] = {"severity": "critical", "event": True,
+                                                    "text": f"SN{n} uid {u}: now held by another hotkey {x['hotkey_short']} (was {short(base.get('hotkey'))}: deregistered)"}
+            else:
+                br = base.get("rank")
+                txt = None
+                if br is None and rank is not None:
+                    txt, sev = f"started earning incentive, now #{rank} ({fmt(x['incentive'])})", "info"
+                elif br is not None and rank is None:
+                    txt, sev = f"stopped earning incentive (was #{br})", "warning"
+                elif br is not None and abs(rank - br) >= rank_move:
+                    txt = f"incentive rank #{br} to #{rank} ({fmt(x['incentive'])})"
+                    sev = "info" if rank < br else "warning"
+                if txt:
+                    found[f"rank_move:SN{n}:{u}"] = {"severity": sev, "event": True, "text": f"SN{n} uid {u} {x['hotkey_short']}: {txt}",
+                                                     "data": {"rank_before": br, "rank_after": rank}}
+                else:
+                    keep["rank"] = br       # small moves add up against the rank last told
+        memo["watched"][str(u)] = keep
+    return found, memo
+
+
+def cmd_uids(args):
+    n = args.netuid
+    only = sorted(set(args.uid or []))
+    if args.top < 0:
+        raise Usage("--top must be 0 (all) or more")
+    if args.rank_move < 1:
+        raise Usage("--rank-move must be 1 or more")
+    role = "miner" if args.miners else ("validator" if args.validators else None)
+    sort = args.sort or ("dividends" if role == "validator" else "incentive")
+    reads, r = run_read(lambda rd: _uids_reads(rd, n))
+    t_now = now()
+    if not args.no_save:
+        subnet_history_update(reads["subnets"], r.block, t_now, True)
+    out, rows = uids_report(n, reads, r.block, t_now, sort, role, args.top, only)
+    if not args.watch:
+        return out, uids_text
+
+    path = watch_path("uids", f"sn{n}" + ("-u" + "-".join(map(str, only)) if only else ""))
+    prev = load_watch(path)
+    found, memo = uids_watch(out, rows, only, prev, args.rank_move)
+    diff = watch_diff(prev["alerts"] if prev else None, found, t_now)
+    ld = out["leader"]
+    who = {"netuid": n, "subnet": out["subnet"], "watched_uids": only,
+           "leader": None if not ld else {k: ld[k] for k in ("uid", "hotkey", "incentive")}}
+    w = watch_output("uids", who, r.block, t_now, prev, diff, out.get("unread") or [])
+    if not args.no_save:
+        save_watch(path, diff["stored"], memo, r.block, t_now)
+    label = f"SN{n} uid watch" + (f" (uids {', '.join(map(str, only))})" if only else "")
+    return w, lambda o: watch_text(o, label, uids_text(out))
+
+
+def _uid_list(s: str) -> list[int]:
+    try:
+        return [int(x) for x in s.split(",") if x.strip()]
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{s!r}: uids are whole numbers, e.g. 12 or 12,40") from None
+
+
 # ---- week --------------------------------------------------------------------------
 def week_report(subnets: dict, block: int, t_now: float, base: dict | None, base_source: str | None, top: int) -> dict:
     out = {"ok": True, "command": "week", **head_dict(block, t_now), "subnets_now": len(subnets)}
@@ -1762,6 +2075,17 @@ def build_parser():
     s.add_argument("--netuid", type=int, default=None)
     s.add_argument("--watch", action="store_true", help=WATCH_HELP)
     s.set_defaults(fn=cmd_hotkey)
+    s = common(sub.add_parser("uids", help="every uid of one subnet: incentive, emission, stake, the leader (champion), concentration"))
+    s.add_argument("netuid", type=int)
+    s.add_argument("--top", type=int, default=10, help="list this many uids (default 10; 0 = all)")
+    s.add_argument("--sort", choices=sorted(UIDS_SORT), default=None, help="order of the list (default incentive; dividends with --validators; stake = the chain's stake weight)")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--miners", action="store_true", help="list miners only")
+    g.add_argument("--validators", action="store_true", help="list validators only")
+    s.add_argument("--uid", type=_uid_list, action="extend", help="also list these uids (12 or 12,40); with --watch: the uids to watch")
+    s.add_argument("--watch", action="store_true", help=WATCH_HELP + "; alerts when the leader changes or a --uid's incentive rank moves")
+    s.add_argument("--rank-move", type=int, default=5, help="with --watch: alert when a watched uid's incentive rank moves this many places (default 5)")
+    s.set_defaults(fn=cmd_uids)
     s = common(sub.add_parser("week", help="price movers, new subnets, emission changes over about 7 days"))
     s.add_argument("--top", type=int, default=5)
     s.add_argument("--no-archive", action="store_true", help="never ask an archive node for the state 7 days ago")

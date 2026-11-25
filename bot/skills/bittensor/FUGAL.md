@@ -12,7 +12,9 @@
   default model comes from **Engy** (Bittensor SN53, model inference; reads
   text and images; thinking is off, so replies take a few seconds).
 - Live figures for SN70 (price, pool, emission, neurons, owner) come only
-  from `taoq subnet 70`; this file has none.
+  from `taoq subnet 70`; this file has none. Its miners on chain, the current
+  champion (the miner with the most incentive) and any UID: `taoq uids 70`.
+  The leaderboard page shows Fugal's own scores; the chain shows who is paid.
 - Anything not written here or in Fugal's own docs: say you do not know and
   offer to read https://www.fugalai.com/docs or the repository.
 

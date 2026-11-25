@@ -340,6 +340,10 @@ alpha; shares 0..1; percentages as 12.5 = 12.5%; per day = 7,200 blocks.
 | `blocks_since_weights`, `last_weights_block` | validator activity |
 | `stake_weight` | alpha stake + 0.18 x root TAO stake |
 | `deregistration.risk`, `next_to_prune_uid` | see Registration section |
+| `leader` (`taoq uids`) | the uid with the most incentive, the owner's own hotkey left out: on a winner-take-all subnet, the champion; `tied_with`, `runner_up` |
+| `role` (`taoq uids`) | `validator` = holds a permit and earns more dividends than incentive; otherwise `miner` (a permit holder that earns incentive is mining) |
+| `incentive_rank` | 1 = most incentive on the subnet; `null` = earns none |
+| `concentration.top1_share` ... `top10_share` | share of the subnet's incentive held by the top 1 / 3 / 10 (owner's hotkey left out); `owner_hotkey_share` is what the owner's hotkey takes (often a burn) |
 | `identity` | owner-published GitHub, URL, Discord, contact, description: self-declared, not checked by the chain |
 | `severity` | `info`, `warning`, `critical`: repeat as given, never upgrade |
 

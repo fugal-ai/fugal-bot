@@ -861,5 +861,217 @@ class TestFollowSubnet(unittest.TestCase):
         self.assertIn("the news feed", o["unread"])
 
 
+# ---- taoq uids ------------------------------------------------------------------------
+# fixtures/finney-uids.json.gz: a real read of finney at one finalized block for
+# SN70 (winner-take-all: one miner holds all incentive) and SN64 (a large subnet
+# where permit holders also mine). Contact fields blanked.
+UIDS_FX = os.path.join(HERE, "fixtures", "finney-uids.json.gz")
+
+
+def raw_uids():
+    with gzip.open(UIDS_FX, "rt", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def mg_key(n):
+    return taoq._key("call", "SubnetInfoRuntimeApi", "get_metagraph", [n])
+
+
+def uids_variant(mutate) -> str:
+    fx = raw_uids()
+    mutate(fx["reads"])
+    fd, path = tempfile.mkstemp(suffix=".json.gz")
+    os.close(fd)
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(fx, f)
+    return path
+
+
+def frac(v):
+    return (Decimal(v) / 65535).quantize(Decimal("0.00001"))
+
+
+class TestUids(unittest.TestCase):
+    def setUp(self):
+        self.fx = raw_uids()
+        self.run = Run()
+        self.run.env["TAOQ_FIXTURE"] = UIDS_FX
+
+    def mg(self, n):
+        return self.fx["reads"][mg_key(n)]
+
+    def test_every_field_of_every_uid_is_the_chains(self):
+        for n in (70, 64):
+            mg = self.mg(n)
+            o = self.run.json("uids", str(n), "--top", "0")
+            self.assertEqual((o["netuid"], o["neurons"], o["listed"]), (n, len(mg["hotkeys"]), len(mg["hotkeys"])))
+            self.assertNotIn("unread", o)
+            per_day = Decimal(7200) / (mg["tempo"] + 1)
+            for x in o["uids"]:
+                u = x["uid"]
+                self.assertEqual(x["hotkey"], mg["hotkeys"][u])
+                self.assertEqual(x["hotkey_short"], mg["hotkeys"][u][:6] + "…" + mg["hotkeys"][u][-4:])
+                self.assertEqual(x["coldkey"], mg["coldkeys"][u])
+                self.assertEqual(Decimal(str(x["incentive"])), frac(mg["incentives"][u]))
+                self.assertEqual(Decimal(str(x["dividends"])), frac(mg["dividends"][u]))
+                self.assertEqual(Decimal(str(x["emission_alpha_per_epoch"])), Decimal(mg["emission"][u]) / 10**9)
+                self.assertEqual(Decimal(str(x["emission_alpha_per_day"])),
+                                 (Decimal(mg["emission"][u]) / 10**9 * per_day).quantize(Decimal("0.000000001")))
+                self.assertEqual(Decimal(str(x["stake_alpha"])), Decimal(mg["alpha_stake"][u]) / 10**9)
+                self.assertEqual(Decimal(str(x["stake_tao_root"])), Decimal(mg["tao_stake"][u]) / 10**9)
+                self.assertEqual(x["validator_permit"], mg["validator_permit"][u])
+                self.assertEqual(x["registered_at_block"], mg["block_at_registration"][u])
+                self.assertEqual(x["immune"], o["block"] - mg["block_at_registration"][u] < mg["immunity_period"])
+                self.assertEqual(x["last_weights_block"], mg["last_update"][u] or None)
+                self.assertEqual(x["owner_hotkey"], mg["hotkeys"][u] == mg["owner_hotkey"])
+                inc, div = mg["incentives"][u], mg["dividends"][u]
+                self.assertEqual(x["role"], "validator" if mg["validator_permit"][u] and div >= inc else "miner")
+                higher = sum(1 for v in mg["incentives"] if v > inc)
+                self.assertEqual(x["incentive_rank"], higher + 1 if inc else None)
+            self.assertEqual(o["validators_with_permit"], sum(mg["validator_permit"]))
+
+    def test_the_leader_and_concentration(self):
+        for n in (70, 64):
+            mg = self.mg(n)
+            o = self.run.json("uids", str(n))
+            cand = sorted((u for u, v in enumerate(mg["incentives"]) if v and mg["hotkeys"][u] != mg["owner_hotkey"]),
+                          key=lambda u: (-mg["incentives"][u], u))
+            self.assertEqual(o["leader"]["uid"], cand[0])
+            self.assertEqual(o["leader"]["hotkey"], mg["hotkeys"][cand[0]])
+            self.assertEqual(o["leader"]["coldkey"], mg["coldkeys"][cand[0]])
+            c = o["concentration"]
+            for k, top in (("top1_share", 1), ("top3_share", 3), ("top10_share", 10)):
+                want = (Decimal(sum(mg["incentives"][u] for u in cand[:top])) / 65535).quantize(Decimal("0.0001"))
+                self.assertEqual(Decimal(str(c[k])), want, (n, k))
+            self.assertEqual(c["distinct_coldkeys_earning"], len({mg["coldkeys"][u] for u in cand}))
+            price = Decimal(str(o["price"]))
+            self.assertEqual(Decimal(str(o["leader"]["emission_tao_per_day_at_price"])),
+                             (Decimal(str(o["leader"]["emission_alpha_per_day"])) * price).quantize(Decimal("0.000000001")))
+        # SN70 at this block: one miner takes all incentive.
+        o = self.run.json("uids", "70")
+        self.assertEqual((o["leader"]["incentive"], o["leader"]["runner_up"], o["concentration"]["top1_share"]), (1, None, 1))
+        # SN64: the leader holds a validator permit yet mines.
+        o = self.run.json("uids", "64")
+        self.assertEqual(o["leader"]["role"], "miner")
+
+    def test_sort_filter_top_and_extra_uids(self):
+        mg = self.mg(64)
+        o = self.run.json("uids", "64", "--sort", "stake", "--top", "5")
+        w = [mg["total_stake"][x["uid"]] for x in o["uids"]]
+        self.assertEqual(w, sorted((v for v in mg["total_stake"]), reverse=True)[:5])
+        v = self.run.json("uids", "64", "--validators")
+        self.assertEqual((v["filter"], v["sort"]), ("validator", "dividends"))
+        self.assertTrue(v["uids"] and all(x["role"] == "validator" and x["dividends"] > 0 for x in v["uids"]))
+        m = self.run.json("uids", "64", "--miners", "--top", "3", "--uid", "0,1")
+        self.assertEqual([x["role"] for x in m["uids"][:3]], ["miner"] * 3)
+        self.assertEqual([x["uid"] for x in m["uids"][3:]], [0, 1])          # asked for, listed after the top 3
+        # A top-N list leaves out uids with none of the sort key.
+        self.assertEqual(self.run.json("uids", "70")["listed"], sum(1 for x in self.mg(70)["incentives"] if x))
+
+    def test_text_is_short(self):
+        code, out, _ = self.run("uids", "64", "--text")
+        self.assertEqual(code, 0)
+        lines = out.strip().splitlines()
+        self.assertTrue(lines[0].startswith("SN64 "))
+        self.assertTrue(lines[1].startswith("Leader (most incentive"))
+        self.assertIn("Incentive held by the top 1:", lines[2])
+        self.assertEqual(len(lines), 4 + 10)
+        code, out, _ = self.run("uids", "64", "--text", "--top", "0")
+        self.assertLessEqual(len(out), taoq.UIDS_TEXT_MAX)
+        self.assertIn("more not shown", out)
+
+    def test_unreadable_lists_are_null_and_named(self):
+        path = uids_variant(lambda reads: reads[mg_key(70)].pop("consensus") and reads[mg_key(70)].pop("alpha_stake"))
+        o = self.run.json("uids", "70", "--top", "0", env={"TAOQ_FIXTURE": path})
+        self.assertEqual(o["unread"], ["alpha_stake"])                      # consensus is optional: just null
+        self.assertTrue(all(x["stake_alpha"] is None and x["consensus"] is None for x in o["uids"]))
+
+    def test_bad_arguments(self):
+        self.assertEqual(self.run("uids", "999")[0], 2)
+        self.assertEqual(self.run("uids", "70", "--uid", "300")[0], 2)
+        self.assertEqual(self.run("uids", "70", "--uid", "x")[0], 2)
+        self.assertEqual(self.run("uids", "70", "--miners", "--validators")[0], 2)
+        self.assertEqual(self.run("uids", "70", "--top", "-1")[0], 2)
+
+
+def set_incentive(n, values: dict):
+    """A mutation: these uids get these u16 incentives; every other uid none."""
+    def mutate(reads):
+        mg = reads[mg_key(n)]
+        mg["incentives"] = [values.get(u, 0) for u in range(len(mg["incentives"]))]
+    return mutate
+
+
+class TestUidsWatch(unittest.TestCase):
+    """taoq uids --watch, one check after the other on variants of the recorded read."""
+
+    def setUp(self):
+        self.run = Run()
+        self.run.env["TAOQ_FIXTURE"] = UIDS_FX
+        self.t = T0
+
+    def check(self, mutate, *args):
+        self.t += H6
+        return self.run.json("uids", "64", "--watch", *args, now=self.t, env={"TAOQ_FIXTURE": uids_variant(mutate)})
+
+    def test_leader_changes_and_ties(self):
+        base = {21: 30000, 194: 20000, 207: 10000, 8: 5535}
+        first = self.check(set_incentive(64, base))
+        self.assertEqual((first["first_check"], first["alert"], first["leader"]["uid"]), (True, True, 21))
+        self.assertNotIn("uids", first)
+        q = self.check(set_incentive(64, {**base, 194: 21000}))            # the rest moves, the leader stays
+        self.assertEqual((q["alert"], q["new"]), (False, []))
+        code, out, _ = self.run("uids", "64", "--watch", "--text", now=self.t + 60,
+                                env={"TAOQ_FIXTURE": uids_variant(set_incentive(64, base))})
+        self.assertEqual((code, out.strip()), (0, "NO_REPLY"))
+        tie = self.check(set_incentive(64, {**base, 194: 30000}))           # a tie keeps the leader: no coin-flip alerts
+        self.assertIs(tie["alert"], False)
+        tie_low = self.check(set_incentive(64, {**base, 21: 20000, 194: 20000, 8: 30000 - 15535}))
+        self.assertIs(tie_low["alert"], False)                              # 21 still tied for the top
+        new = self.check(set_incentive(64, {**base, 194: 40000, 21: 10000}))
+        self.assertIs(new["alert"], True)
+        self.assertEqual([(i["key"], i["severity"]) for i in new["new"]], [("leader_changed:SN64", "warning")])
+        self.assertIn("new leader uid 194", new["new"][0]["text"])
+        self.assertIn("was uid 21", new["new"][0]["text"])
+        self.assertEqual(new["leader"]["uid"], 194)
+        again = self.check(set_incentive(64, {**base, 194: 40000, 21: 10000}))
+        self.assertIs(again["alert"], False)
+        code, out, _ = self.run("uids", "64", "--watch", "--text", now=self.t + H6,
+                                env={"TAOQ_FIXTURE": uids_variant(set_incentive(64, base))})
+        lines = out.strip().splitlines()
+        self.assertTrue(lines[0].startswith("SN64 uid watch (block"), lines[0])
+        self.assertTrue(lines[1].startswith("NEW warning: SN64: new leader uid 21"), lines[1])
+        gone = self.check(set_incentive(64, {}))
+        self.assertIn("no miner earns incentive any more", gone["new"][0]["text"])
+
+    def test_watched_uid_rank_moves(self):
+        ranks = {u: 1000 * (20 - i) for i, u in enumerate([21, 194, 207, 8, 52, 82, 14, 254, 30, 40, 41, 42])}
+        args = ("--uid", "52", "--rank-move", "3")                          # uid 52 is #5
+        self.check(set_incentive(64, ranks), *args)
+        small = self.check(set_incentive(64, {**ranks, 52: 17500}), *args)  # #5 -> #4: small
+        self.assertIs(small["alert"], False)
+        small2 = self.check(set_incentive(64, {**ranks, 52: 12500}), *args) # #8: 3 from #5, the rank last told
+        self.assertEqual([(i["key"], i["severity"]) for i in small2["new"]], [("rank_move:SN64:52", "warning")])
+        self.assertIn("#5 to #8", small2["new"][0]["text"])
+        up = self.check(set_incentive(64, {**ranks, 52: 19500}), *args)   # #8 -> #2
+        self.assertEqual([(i["key"], i["severity"]) for i in up["new"]], [("rank_move:SN64:52", "info")])
+        stop = self.check(set_incentive(64, {k: v for k, v in ranks.items() if k != 52}), *args)
+        self.assertIn("stopped earning incentive", stop["new"][0]["text"])
+        start = self.check(set_incentive(64, ranks), *args)
+        self.assertIn("started earning incentive, now #5", start["new"][0]["text"])
+
+        def replaced(reads):
+            set_incentive(64, ranks)(reads)
+            reads[mg_key(64)]["hotkeys"][52] = ALICE
+        r = self.check(replaced, *args)
+        self.assertEqual([(i["key"], i["severity"]) for i in r["new"]], [("uid_replaced:SN64:52", "critical")])
+
+    def test_watches_do_not_share_state(self):
+        self.check(set_incentive(64, {21: 100}))
+        self.check(set_incentive(64, {21: 100}), "--uid", "5")
+        self.assertEqual(sorted(f for f in os.listdir(self.run.dir) if f.startswith("watch-")),
+                         ["watch-uids-sn64-u5.json", "watch-uids-sn64.json"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,7 @@ cannot be reached, `taoq` says so: say that, never guess.
 | Stake, positions, value, what unstaking returns | `taoq stake <coldkey>` | nothing else | Never estimate. |
 | A subnet's price, pool, emission, owner, registration cost, links | `taoq subnet <netuid>` | `taoq subnet-brief <netuid>` for validators and miners | `identity` gives GitHub, website, Discord, contact. |
 | A hotkey's standing, permit, pruning risk | `taoq hotkey <hotkey> [--netuid N]` | | |
+| A subnet's miners, champion (top miner), leaderboard, one UID | `taoq uids <netuid> [--top N] [--miners\|--validators] [--uid U]` | the subnet's own leaderboard page (its off-chain scores) | One metagraph read: every uid's incentive, emission, stake, permit, registration. `--watch` for "tell me when the champion changes". |
 | What moved this week across Bittensor | `taoq week` | `taoq news --since-hours 168` | |
 | What is new for subnets X, Y (releases, announcements, chain events) | `taoq news X Y --since-hours 168` (the Fugal news feed) | GitHub releases of the subnet's repo (the link `taoq subnet` prints), the subnet's own channels | What the feed covers: "The news feed" below. |
 | A subnet's code releases | `taoq subnet <n>` prints the GitHub API releases link; or `https://github.com/<owner>/<repo>/releases.atom` | `.../commits.atom` (noisy) | Unauthenticated GitHub API: 60 requests/hour per IP. The Atom feeds are lighter. |

@@ -20,6 +20,7 @@ install packages or hand-write RPC, and to stop after two failures.
 | `taoq subnet <netuid>...` | price, EMA price, pool reserves, market cap, TAO emission per day and share, alpha emission, tempo, neurons / max, registration cost, immunity period, age, owner hotkey and coldkey, on-chain identity (GitHub, URL, description), GitHub API links for releases and commits, price change against stored snapshots |
 | `taoq hotkey <hotkey> [--netuid N]` | each subnet where it is registered (all subnets scanned without `--netuid`): uid, active, validator permit, incentive, dividends, consensus, trust, validator trust, rank, emission per epoch and per day, stake, last weight-setting block, immunity, and a deregistration reading |
 | `taoq week` | price movers (top 5 up and down), emission share changes, new subnets (last 7 days), deregistered or replaced subnets, top subnets by emission; compared with a stored snapshot about 7 days old, else with the state 7 days ago from an archive node |
+| `taoq uids <netuid>` | every uid of one subnet from one metagraph call: hotkey (full and short), coldkey, role, validator permit, incentive and its rank, dividends, consensus, emission per epoch and per day, stake (alpha, root TAO, stake weight), registration block and immunity, last weight update; a header with the leader (most incentive, the owner's own hotkey left out: the "champion" of a winner-take-all subnet), its pay per day, the runner-up, and concentration (top 1 / 3 / 10 shares, coldkeys earning, the largest coldkey, the owner's hotkey share); below |
 | `taoq subnet-brief <netuid>` | the `subnet` facts plus the metagraph: validators with permit and how many set weights, miners earning incentive and from how many coldkeys, incentive concentration, top validators and miners, immune neurons, the next uid to be pruned |
 | `taoq news [<netuid>...] [--mine <coldkey>]` | not the chain: the shared Fugal feed (releases, announcements, chain events, news headlines) for those subnets, the wallet's subnets plus the network, or (no netuids) the network; below |
 | `taoq briefing <coldkey>` | the daily briefing in one run: the `stake` report, then what changed on the wallet's subnets since the last briefing, then the network's headlines; below |
@@ -33,7 +34,10 @@ tempos), `subnet --since-hours H`, `week --top N`, `week --no-archive`,
 watch's threshold; `subnet --watch --news` adds the feed's items), `stake
 --no-news` (with `--text`: no news sections), `news --since-hours H | --since
 ISO`, `news --limit N` (1 to 100, default 30), `news --watch`,
-`briefing --news-since-hours H`.
+`briefing --news-since-hours H`, `uids --top N` (default 10; 0 = every uid),
+`uids --sort incentive|emission|stake|dividends`, `uids --miners|--validators`,
+`uids --uid U[,U...]` (also list these; with `--watch`, follow them),
+`uids --watch [--rank-move N]`.
 
 Examples from finney (block 9568260, trimmed):
 
@@ -46,11 +50,52 @@ Total: 93.2788 TAO staked (at current prices; about 72.0706 TAO if unstaked now)
 $ taoq hotkey 5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u --netuid 70 --text
 - SN70 Fugal uid 1 (validator): incentive 0, dividends 0.39611, 1,166.12 α/day, weights set 334 blocks ago; deregistration: low (position 244 of 245 ...)
 
+$ taoq uids 70 --text --top 5          (block 9580609)
+SN70 Fugal (block 9580609): 256/256 neurons, 4 validators, 1 of 252 miners earning, price 0.002905 TAO/α
+Leader (most incentive, the owner's own hotkey left out): uid 247 5DX6Bu…D2Av (miner), coldkey 5HB4S1…zwd7, incentive 1, 2,943.84 α/day (about 8.55 TAO/day at this price), registered 1.5 d ago; nobody else earns incentive
+Incentive held by the top 1: 100%, top 3: 100%, top 10: 100%; coldkeys earning: 1, the largest 5HB4S1…zwd7 100% over 1 uid(s)
+Top 1 by incentive (1 with any):
+- uid 247 5DX6Bu…D2Av miner: inc 1 (#1), 2,943.84 α/day, coldkey 5HB4S1…zwd7, 1.5 d old
+
 $ taoq week --text
 Compared with block 9517872 (7.0 days earlier, archive node).
 Up: SN35 logic +137.5%, SN26 Pocket +106.8%, SN40 Ralph +39.9%, ...
 New: SN57 Roa (1.5 d), SN84 ansuz (3.0 d), SN109 armeni (4.5 d), SN113 gje (6.0 d)
 ```
+
+## Every uid of a subnet: `taoq uids`
+
+One `SubnetInfoRuntimeApi.get_metagraph` call (plus the subnet list for the
+price and the owner's immortal-uid limit) at the finalized block; no per-uid
+calls. A top-N list (the default, 10) leaves out the uids with none of what it
+is sorted by and says how many have any; `--top 0` lists every uid. JSON
+carries every field; `--text` is one line per uid and at most 3,000 characters.
+
+- **role**: `validator` for a permit holder that earns at least as much in
+  dividends as in incentive, otherwise `miner` (on SN64 permit holders mine).
+  `--miners` / `--validators` filter by it; `--validators` sorts by dividends.
+- **leader**: the uid with the most incentive, not counting the subnet owner's
+  own hotkey (where an owner "burns" incentive to uid 0); ties name `tied_with`.
+  `incentive_rank` is 1 for the most incentive, shared by ties, `null` for none.
+- **concentration**: shares of the subnet's total incentive (u16 / 65535) held
+  by the top 1, 3 and 10 (the owner's hotkey left out), the number of coldkeys
+  earning, the largest coldkey's share, and the owner hotkey's own share.
+- **stake** is the chain's own figure from the metagraph: inherited stake, with
+  child/parent key delegation applied; `stake_weight` = alpha + `TaoWeight` x
+  root TAO.
+- A list the runtime did not return is `null` for every uid and named in
+  `unread` (`consensus` may be empty on some runtimes and is then just null).
+
+`taoq uids <netuid> --watch [--uid U,...] [--rank-move N]` is a watch in the
+style below. All its findings are events: `leader_changed:SN<n>` (`warning`,
+with the old and new leader in `data`; a tie at the top keeps the earlier
+leader, so a coin flip is not an alert), and for each `--uid`:
+`rank_move:SN<n>:<uid>` (its incentive rank moved by `--rank-move` places,
+default 5, since the rank last told, or it started or stopped earning;
+`warning` when worse, `info` when better; small moves add up against the rank
+last told, so a slow slide is still told once) and `uid_replaced:SN<n>:<uid>`
+(`critical`: another hotkey holds that uid now). State in
+`watch-uids-sn<n>[-u<uids>].json`.
 
 ## Watches: only what is new
 
@@ -319,6 +364,19 @@ for the image without it, measured on the same host).
   storage alone, the 7-day price change against the pool reserves at the old
   block on the archive node, the brief's counts against `ValidatorPermit` and
   `get_neurons_lite`. Result on 2026-11-23: 119 passed, 0 failed.
+  `taoq uids` (SN70 and SN64, every uid; `livecheck.py --uids-only` runs just
+  these): hotkey, coldkey, incentive, dividends, consensus, emission, permit,
+  active, last update, registration, immunity, incentive rank, the leader and
+  the concentration against plain storage (`Keys`, `Owner`, `Incentive`,
+  `Dividends`, `Consensus`, `Emission`, `ValidatorPermit`, `Active`,
+  `LastUpdate`, `BlockAtRegistration`, `ImmunityPeriod`, `Tempo`,
+  `SubnetOwnerHotkey`); stake against `TotalHotkeyAlpha` (exact for the uids
+  without child/parent keys: 253 of 256 on SN70, 242 of 256 on SN64; the
+  others recomputed from the `ChildKeys` / `ParentKeys` proportions agree
+  within 1.2 %, the chain's own rounding of delegation not replicated); stake
+  weight = alpha + `TaoWeight` x root. Result on 2026-11-24 (blocks 9580606
+  and 9580608): 52 passed, 0 failed. The unit tests replay
+  `bot/tools/fixtures/finney-uids.json.gz` (SN70 and SN64 at block 9580569).
 - In the container (`scripts/hosted-test.sh`, `scripts/smoke.sh`, via
   `scripts/first-conversation.sh`): the scripted model carries the first
   conversation and the bot's own shell runs `taoq` for real (live by default;

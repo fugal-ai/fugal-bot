@@ -26,6 +26,15 @@ How each figure is checked a second way:
              blocks (current_alpha_price at the archive block).
   subnet-brief  validator count from ValidatorPermit storage; incentive shares
              from NeuronInfoRuntimeApi.get_neurons_lite.
+  uids       (SN70 and SN64, every uid) hotkey, coldkey, incentive, dividends,
+             consensus, emission, permit, active, last update, registration,
+             immunity, incentive rank, the leader and the concentration from
+             plain storage (Keys, Owner, Incentive, Dividends, Consensus,
+             Emission, ValidatorPermit, Active, LastUpdate, BlockAtRegistration,
+             ImmunityPeriod, Tempo, SubnetOwnerHotkey); stake against
+             TotalHotkeyAlpha (exact without child/parent keys; with them,
+             recomputed from the ChildKeys/ParentKeys proportions within 2%);
+             stake weight = alpha + TaoWeight x root.
 """
 
 from __future__ import annotations
@@ -264,14 +273,120 @@ async def check_brief(s, out):
         ok(share == D(out["metagraph"]["top1_incentive_share"]), f"SN{n}: top miner's incentive share {share} = {out['metagraph']['top1_incentive_share']}")
 
 
+async def storage_list(s, bh, st, params):
+    keys = [await s.create_storage_key("SubtensorModule", st, p, block_hash=bh) for p in params]
+    out = []
+    for i in range(0, len(keys), 500):
+        out += [v(x) for _, x in await s.query_multi(keys[i:i + 500], block_hash=bh)]
+    return out
+
+
+async def check_uids(s, out):
+    """Every field of every uid of `taoq uids <n> --top 0` against plain storage at the same block."""
+    bh = await s.get_block_hash(out["block"])
+    n = out["netuid"]
+    rows = out["uids"]
+    size = v(await s.query("SubtensorModule", "SubnetworkN", [n], block_hash=bh))
+    print(f"-- uids SN{n} at block {out['block']}: {len(rows)} uids")
+    ok(len(rows) == size == out["neurons"], f"SN{n}: {len(rows)} uids listed = storage SubnetworkN {size}")
+    keys = await storage_list(s, bh, "Keys", [[n, u] for u in range(size)])
+    owners = await storage_list(s, bh, "Owner", [[k] for k in keys])
+    regs = await storage_list(s, bh, "BlockAtRegistration", [[n, u] for u in range(size)])
+    vec = {st: v(await s.query("SubtensorModule", st, [n], block_hash=bh))
+           for st in ("Incentive", "Dividends", "Consensus", "Emission", "ValidatorPermit", "LastUpdate", "Active")}
+    tempo = v(await s.query("SubtensorModule", "Tempo", [n], block_hash=bh))
+    imm = v(await s.query("SubtensorModule", "ImmunityPeriod", [n], block_hash=bh))
+    owner_hk = v(await s.query("SubtensorModule", "SubnetOwnerHotkey", [n], block_hash=bh))
+    children = await storage_list(s, bh, "ChildKeys", [[h, n] for h in keys])
+    parents = await storage_list(s, bh, "ParentKeys", [[h, n] for h in keys])
+    allk = sorted(set(keys) | {p for ps in parents for _, p in (ps or [])})
+    own_a = dict(zip(allk, await storage_list(s, bh, "TotalHotkeyAlpha", [[h, n] for h in allk])))
+    own_r = dict(zip(allk, await storage_list(s, bh, "TotalHotkeyAlpha", [[h, 0] for h in allk])))
+    tw = Decimal(v(await s.query("SubtensorModule", "TaoWeight", [], block_hash=bh))) / (2**64 - 1)
+    per_day = Decimal(7200) / (tempo + 1)
+    f = lambda x: (Decimal(x) / 65535).quantize(Decimal("0.00001"))   # noqa: E731
+    U64 = Decimal(2**64 - 1)
+    mism = {}
+
+    def same(name, a, b):
+        if a != b:
+            mism.setdefault(name, []).append((u, a, b))
+    deleg_worst = Decimal(0)
+    plain_stake = deleg = 0
+    for x in rows:
+        u = x["uid"]
+        same("hotkey = Keys", x["hotkey"], keys[u])
+        same("coldkey = Owner(hotkey)", x["coldkey"], owners[u])
+        same("incentive = Incentive / 65535", D(x["incentive"]), f(vec["Incentive"][u]))
+        same("dividends = Dividends / 65535", D(x["dividends"]), f(vec["Dividends"][u]))
+        same("consensus = Consensus / 65535", D(x["consensus"]), f(vec["Consensus"][u]))
+        same("emission per epoch = Emission", D(x["emission_alpha_per_epoch"]), Decimal(vec["Emission"][u]) / RAO)
+        same("emission per day = Emission x 7200 / (Tempo + 1)", D(x["emission_alpha_per_day"]),
+             (Decimal(vec["Emission"][u]) / RAO * per_day).quantize(Decimal("0.000000001")))
+        same("validator permit = ValidatorPermit", x["validator_permit"], bool(vec["ValidatorPermit"][u]))
+        same("active = Active", x["active"], bool(vec["Active"][u]))
+        same("last weights = LastUpdate", x["last_weights_block"], vec["LastUpdate"][u] or None)
+        same("registered at = BlockAtRegistration", x["registered_at_block"], regs[u])
+        same("immune = block - BlockAtRegistration < ImmunityPeriod", x["immune"], out["block"] - regs[u] < imm)
+        same("owner hotkey = SubnetOwnerHotkey", x["owner_hotkey"], keys[u] == owner_hk)
+        inc = vec["Incentive"][u]
+        same("incentive rank from Incentive", x["incentive_rank"], (1 + sum(1 for y in vec["Incentive"] if y > inc)) if inc else None)
+        # Stake: the metagraph gives inherited stake (child/parent key delegation applied).
+        for label, own, got in (("stake_alpha", own_a, x["stake_alpha"]), ("stake_tao_root", own_r, x["stake_tao_root"])):
+            init = Decimal(own[keys[u]] or 0)
+            want = init - sum(init * Decimal(p) / U64 for p, _ in (children[u] or [])) \
+                + sum(Decimal(own[par] or 0) * Decimal(p) / U64 for p, par in (parents[u] or []))
+            if children[u] or parents[u]:
+                deleg += 1
+                deleg_worst = max(deleg_worst, abs(want / RAO - D(got)) / max(want / RAO, Decimal("0.000000001")))
+            else:
+                plain_stake += 1
+                same(f"{label} = TotalHotkeyAlpha (no child/parent keys)", D(got), want / RAO)
+        same("stake weight = alpha + TaoWeight x root (within 1e-9 relative)",
+             abs(D(x["stake_weight"]) - (D(x["stake_alpha"]) + D(x["stake_tao_root"]) * tw)) <= D(x["stake_weight"]) * Decimal("1e-9") + Decimal("0.000000002"), True)
+    names = ["hotkey = Keys", "coldkey = Owner(hotkey)", "incentive = Incentive / 65535", "dividends = Dividends / 65535",
+             "consensus = Consensus / 65535", "emission per epoch = Emission", "emission per day = Emission x 7200 / (Tempo + 1)",
+             "validator permit = ValidatorPermit", "active = Active", "last weights = LastUpdate", "registered at = BlockAtRegistration",
+             "immune = block - BlockAtRegistration < ImmunityPeriod", "owner hotkey = SubnetOwnerHotkey", "incentive rank from Incentive",
+             "stake_alpha = TotalHotkeyAlpha (no child/parent keys)", "stake_tao_root = TotalHotkeyAlpha (no child/parent keys)",
+             "stake weight = alpha + TaoWeight x root (within 1e-9 relative)"]
+    for name in names:
+        bad = mism.get(name, [])
+        total = plain_stake // 2 if "(no child/parent keys)" in name else len(rows)
+        ok(not bad, f"SN{n}: {name}: {total - len(bad)}/{total} uids" + (f" (first: uid {bad[0][0]} {bad[0][1]} vs {bad[0][2]})" if bad else ""))
+    ok(deleg_worst < Decimal("0.02"), f"SN{n}: stake of the {deleg // 2} uids with child/parent keys, recomputed from TotalHotkeyAlpha x ChildKeys/ParentKeys "
+                                       f"proportions: within {(deleg_worst * 100).quantize(Decimal('0.01'))}% (approximate: taoq reports the chain's own figure)")
+    # The leader and the concentration, from storage only.
+    cand = sorted((u for u in range(size) if vec["Incentive"][u] and keys[u] != owner_hk), key=lambda u: (-vec["Incentive"][u], u))
+    lead = out["leader"]
+    ok((lead or {}).get("uid") == (cand[0] if cand else None) and (not cand or lead["hotkey"] == keys[cand[0]] and lead["coldkey"] == owners[cand[0]]),
+       f"SN{n}: leader uid {(lead or {}).get('uid')} = most Incentive in storage, owner hotkey left out ({cand[0] if cand else None})")
+    for k, top in (("top1_share", 1), ("top3_share", 3), ("top10_share", 10)):
+        want = (Decimal(sum(vec["Incentive"][u] for u in cand[:top])) / 65535).quantize(Decimal("0.0001")) if cand else None
+        ok((None if out["concentration"][k] is None else D(out["concentration"][k])) == want, f"SN{n}: {k} {out['concentration'][k]} = {want} from Incentive storage")
+    ok(out["concentration"]["distinct_coldkeys_earning"] == len({owners[u] for u in cand}), f"SN{n}: {len({owners[u] for u in cand})} coldkeys earning (storage)")
+    tin = v(await s.query("SubtensorModule", "SubnetTAO", [n], block_hash=bh))
+    ain = v(await s.query("SubtensorModule", "SubnetAlphaIn", [n], block_hash=bh))
+    ok(abs(Decimal(tin) / Decimal(ain) - D(out["price"])) / D(out["price"]) < Decimal("0.001"), f"SN{n}: price {out['price']} vs reserve ratio (within 0.1%)")
+    ok(out["tempo"] == tempo and out["immunity_period_blocks"] == imm, f"SN{n}: tempo {tempo} and immunity period {imm} = storage")
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--taoq", default=f"{sys.executable} -I {os.path.join(HERE, 'taoq.py')}")
+    ap.add_argument("--uids-only", action="store_true", help="only the `taoq uids` checks")
+    ap.add_argument("--uids-netuids", type=lambda x: [int(i) for i in x.split(",")], default=[70, 64],
+                    help="subnets for the `taoq uids` checks (default 70,64: SN70 and a large subnet)")
     args = ap.parse_args()
     from async_substrate_interface import AsyncSubstrateInterface
 
     async with AsyncSubstrateInterface(url=LITE, ss58_format=42) as s:
         bh = await s.get_chain_finalised_head()
+        if args.uids_only:
+            for n in args.uids_netuids:
+                await check_uids(s, run_taoq(args.taoq, "uids", str(n), "--top", "0"))
+            print(f"\n== livecheck: {PASS} passed, {FAIL} failed")
+            return 0 if FAIL == 0 else 1
         coldkey, vhk, mhk = await pick_addresses(s, bh)
         print(f"addresses from the SN70 metagraph: coldkey {coldkey}, validator hotkey {vhk}, miner hotkey {mhk}")
         await check_stake(s, run_taoq(args.taoq, "stake", coldkey))
@@ -279,6 +394,8 @@ async def main():
         await check_hotkey(s, run_taoq(args.taoq, "hotkey", vhk, "--netuid", "70"))
         await check_hotkey(s, run_taoq(args.taoq, "hotkey", mhk, "--netuid", "70"))
         await check_brief(s, run_taoq(args.taoq, "subnet-brief", "70"))
+        for n in args.uids_netuids:
+            await check_uids(s, run_taoq(args.taoq, "uids", str(n), "--top", "0"))
         week = run_taoq(args.taoq, "week")
         await check_week(s, week, AsyncSubstrateInterface(url=ARCHIVE, ss58_format=42))
     print(f"\n== livecheck: {PASS} passed, {FAIL} failed")
