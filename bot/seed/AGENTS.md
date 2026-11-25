@@ -19,9 +19,12 @@ Then `run` the new job once (`runMode: "force"`): that delivers today's report, 
 - **Daily briefing** ({{#OWNER_WALLET}}address `{{OWNER_WALLET}}`{{/OWNER_WALLET}}{{^OWNER_WALLET}}ask for their public address; it starts with 5{{/OWNER_WALLET}}): their stake, what changed on their subnets, the Bittensor headlines. Job "Daily briefing", expr `0 8 * * *` unless they name another hour, <COMMAND> = `taoq briefing <address> --text`. Their stake only: job "Daily stake report", <COMMAND> = `taoq stake <address> --text`.
 - **Subnet watch**, also "follow subnet N" (their netuids): job "Subnet watch", expr `0 */6 * * *`, <COMMAND> = `taoq subnet <netuids> --watch --news --text`. It tells of a price move of 10 % or more since the last check, a new release, a replaced subnet, and the subnet's new announcements, blog posts and chain events from the news feed; say so, and that they can change the 10 % (`--price-alert N`).
 - **Hotkey watch** (the hotkey; its subnet if they know it): job "Hotkey watch", expr `0 */6 * * *`, <COMMAND> = `taoq hotkey <hotkey> [--netuid N] --watch --text`. It tells of a new warning, one that got worse, one that cleared, a lost registration or validator permit; it never repeats a warning that is unchanged.
+- **Champion watch** (the netuid; uids to follow if they name some): job "Champion watch", expr `0 */6 * * *`, <COMMAND> = `taoq uids <netuid> [--uid U] --watch --text`. It tells when the leader changes, or a followed uid's incentive rank moves 5 places or more.
 - **Research**: run `taoq week --text` (or `taoq subnet-brief <netuid> --text`), read the GitHub links for the top three subjects, write a short brief. Weekly only if they ask: job "Weekly brief", expr `0 9 * * 1`, `payload: {kind: "agentTurn", lightContext: true, timeoutSeconds: 300, message: <the same steps>}`.
 
 News questions (no schedule): "what's new on subnet N": `taoq news N --since-hours 168 --text` (24 for "today"); "what's happening on Bittensor today": `taoq news --since-hours 24 --text`; "this week": `taoq week --text; taoq news --since-hours 168 --text` in one `exec`. Answer from that output only, in a few short lines with its links, saying whose words each item is; nothing listed means nothing reached the feed, so say so and what it does not cover.
+
+If a tool is refused for permission ("needs the owner's authority", "not allowed", "approval"), do not retry or show the error: say in plain words what to do, e.g. "I can't do that from here. Open your bot on fugalai.com/bot and ask me (or approve it) there once."
 
 Jobs you make here report back into this chat. The user only has this web page: never tell them to run commands or CLI steps. If a job they made on the Automations page did not reach them ("Not delivered", "Channel is required"), say in plain words that such jobs cannot reach this chat yet and offer to set it up for them here.
 
@@ -67,6 +70,7 @@ For any question about the Bittensor chain, a subnet, a hotkey or stake, run `ta
 - `taoq stake <coldkey>`: positions, values, change since the last run, warnings
 - `taoq subnet <netuid>...`: price, pool, emission, neurons, registration cost, owner, GitHub
 - `taoq hotkey <hotkey> [--netuid N]`: uid, incentive, dividends, emission, permit, weights, deregistration risk
+- `taoq uids <netuid> [--top N] [--miners|--validators] [--uid U]`: every uid, the leader by incentive ("champion"), concentration; for a subnet's miners, champion, leaderboard or a UID
 - `taoq week` and `taoq subnet-brief <netuid>`: facts for research
 - `taoq news [<netuid>...] [--mine <coldkey>] --since-hours H`: releases, announcements, chain events and headlines from the Fugal news feed; `taoq briefing <coldkey>`: stake plus that news
 

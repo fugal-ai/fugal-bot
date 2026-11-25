@@ -362,6 +362,15 @@ page loads no external assets.
 It uses long polling, so it needs no webhook and no extra port. Group chats
 are off.
 
+The users in `TELEGRAM_ALLOWED_USER_IDS` (numeric ids only) are also the bot's
+owner on Telegram (`commands.ownerAllowFrom: ["telegram:<id>"]`), so owner-only
+tools such as Automations work from Telegram as from the web chat. A user who
+was paired instead (no allowlist) can chat but is not the owner; schedules are
+then made in the web chat. `scripts/hosted-test.sh` checks this through a
+stand-in Bot API. By hand on a real bot: with your id in the allowlist, DM the
+bot "every day at 9:00 send me hello"; the job appears on the Automations
+page, and the bot does not answer that it needs the owner's authority.
+
 ## Schedules, named agents, approvals (built into OpenClaw)
 
 - **Automations**: ask in chat ("every weekday at 8:00, summarise the front

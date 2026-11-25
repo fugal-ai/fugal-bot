@@ -145,6 +145,10 @@ USER_ZONE = re.compile(r"- Time zone: ([A-Z][a-z]+/[A-Z][A-Za-z_]+)")
 OFFER = "Want a daily briefing for the wallet you signed in with: your stake, what changed on your subnets and the day's Bittensor news? Tell me your time zone."
 # "Open taostats.io and tell me what it shows for subnet 70"
 SITE_ASK = re.compile(r"(?i)\bopen ([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b.*?\bsubnet (\d{1,3})\b", re.S)
+# AGENTS.md: the champion watch recipe (`taoq uids <netuid> [--uid U] --watch --text`)
+CHAMPION_JOB = re.compile(r'job "Champion watch", expr `0 \*/6 \* \* \*`, <COMMAND> = `taoq uids <netuid> \[--uid U\] --watch --text`')
+# AGENTS.md: a tool refused for permission is told in plain words, never as the error.
+REFUSED_PLAIN = "If a tool is refused for permission"
 # The script payload of the watch recipe in AGENTS.md: payload: {kind: "script", script: "<JSON string>"}
 WATCH_SCRIPT = re.compile(r'script: ("(?:[^"\\]|\\.)*")\}')
 
@@ -313,6 +317,27 @@ def first_conversation(ask, system, tools, results):
             jid = JOB_ID.search(text_of(results[1].get("content")))
             return automations(tools, {"action": "run", "jobId": jid.group(0) if jid else "unknown", "runMode": "force"})
         return ("text", f"Scheduled: the hotkey watch every 6 hours ({zone}); its first check arrives here as its own message. "
+                        "Ask me to change or stop it.", None)
+    if "watch the sn70 champion" in ask.lower():
+        # Asked on Telegram (scripts/hosted-test.sh, a stand-in Bot API): the
+        # champion watch from AGENTS.md, made with the automations tool. A
+        # refusal is passed on as it came, so the test sees it.
+        if not CHAMPION_JOB.search(system):
+            return ("text", "SCRIPTED-BRAIN: no champion watch recipe in AGENTS.md", None)
+        zone = USER_ZONE.search(system)
+        zone = zone.group(1) if zone else "UTC"
+        if step == 0:
+            return automations(tools, {"action": "list"})
+        if step == 1:
+            job = script_job(system, "Champion watch", "0 */6 * * *", zone, "taoq uids 70 --watch --text")
+            if not job:
+                return ("text", "SCRIPTED-BRAIN: no script recipe in the workspace files", None)
+            return automations(tools, {"action": "add", "job": job})
+        added = text_of(results[1].get("content"))
+        if not JOB_ID.search(added):
+            plain = " (AGENTS.md says to say it in plain words)" if REFUSED_PLAIN in system else ""
+            return ("text", f"SCRIPTED-BRAIN NOT SCHEDULED{plain}: {added[:300]}", None)
+        return ("text", f"Scheduled: the SN70 champion watch every 6 hours ({zone}); it tells you when the top miner changes. "
                         "Ask me to change or stop it.", None)
     if ask.lower().startswith(("run the daily briefing now", "run the hotkey watch now")):
         jid = JOB_ID.search(ask)

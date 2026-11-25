@@ -401,11 +401,27 @@ if (tgToken) {
       dmPolicy: allow.length ? "allowlist" : "pairing",
       ...(allow.length ? { allowFrom: allow } : {}),
       groupPolicy: "disabled",
+      // TEST ONLY (scripts/hosted-test.compose.yaml): a stand-in Bot API on the
+      // stack's loopback. A room never sets it.
+      ...(/^http:\/\/127\.0\.0\.1:\d+$/.test(env.TELEGRAM_API_ROOT || "") ? { apiRoot: env.TELEGRAM_API_ROOT } : {}),
     },
   };
 } else if (current.channels?.telegram) {
   managed.channels = { telegram: { enabled: false } };
 }
+// The allow-listed Telegram user is the owner. OpenClaw (v2026.11.7,
+// src/auto-reply/command-auth.ts) counts a sender as the owner only through
+// commands.ownerAllowFrom, or a web client with operator.admin: the Telegram
+// allowFrom list admits a sender to the DM but does not make it the owner, so
+// owner-only tools (automations, sessions, gateway) were refused on Telegram
+// ("needs the owner's authority"). Each id goes in as "telegram:<id>": an
+// entry with a channel prefix matches only senders of that channel, and only
+// that exact numeric user id; "*" is ignored by OpenClaw. Only numeric ids from
+// TELEGRAM_ALLOWED_USER_IDS, and only while Telegram is on with an allowlist (a
+// paired sender is never the owner). Entries a person added for other channels
+// are kept; Telegram ones and bare ids (which would match on every channel) are
+// always replaced by ours.
+const tgOwners = tgToken ? list(env.TELEGRAM_ALLOWED_USER_IDS).filter((id) => /^[1-9][0-9]{0,19}$/.test(id)) : [];
 
 let next = merge(current, managed);
 // Keys we must not inherit from an older file.
@@ -415,6 +431,15 @@ if (next.gateway?.auth) {
   delete next.gateway.auth.password;
 }
 if (next.channels?.telegram && !tgToken) delete next.channels.telegram.botToken;
+if (next.channels?.telegram && !managed.channels?.telegram?.apiRoot) delete next.channels.telegram.apiRoot;
+{
+  const kept = (Array.isArray(current.commands?.ownerAllowFrom) ? current.commands.ownerAllowFrom : []).filter(
+    (e) => !/^\s*(telegram|tg):/i.test(String(e)) && !/^\s*[0-9]+\s*$/.test(String(e)),
+  );
+  const owners = [...kept, ...tgOwners.map((id) => `telegram:${id}`)];
+  if (owners.length) next.commands = { ...(next.commands || {}), ownerAllowFrom: owners };
+  else if (next.commands) delete next.commands.ownerAllowFrom;
+}
 
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true, mode: 0o700 });
 const tmp = `${cfgPath}.tmp-${process.pid}`;
@@ -432,7 +457,7 @@ try {
 }
 console.log(
   `[fugal-bot] config rendered: model=${modelRef} input=${modelInputs.join("+")} endpoint=${new URL(baseUrl).host} ` +
-    `telegram=${tgToken ? "on" : "off"} exec=${execMode}` +
+    `telegram=${tgToken ? `on owners=${tgOwners.length}` : "off"} exec=${execMode}` +
     `${displayName ? ` name="${displayName}"` : ""}${accent ? ` accent=${accent}` : ""}` +
     `${extraBody ? ` extra-body-fields=${Object.keys(extraBody).join(",")}` : ""}` +
     `${backgroundOff ? " background-model-use=off" : ""} tools-denied=${next.tools.deny.length}`,

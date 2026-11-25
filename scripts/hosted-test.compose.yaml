@@ -8,7 +8,8 @@
 # restore one-shots are tested against exactly those mounts.
 #
 # Added for the test: "store", a throwaway object store on loopback that
-# stands in for the presigned-URL storage (scripts/object-store.py).
+# stands in for the presigned-URL storage (scripts/object-store.py), and
+# "telegram", a stand-in Telegram Bot API (scripts/telegram-stub.py).
 services:
   netns:
     image: caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
@@ -33,6 +34,11 @@ services:
     # and then the gateway itself mid-turn. hosted-test.sh reports the peak
     # and fails on any OOM kill or gateway restart.
     mem_limit: 4g
+    environment:
+      # Test only: the Telegram channel's Bot API is the "telegram" stub below,
+      # once hosted-test.sh turns Telegram on (empty until then; a room never
+      # sets it).
+      TELEGRAM_API_ROOT: ${HOSTED_TEST_TELEGRAM_API_ROOT:-}
   modelproxy:
     network_mode: "service:netns"
     networks: !reset null
@@ -78,6 +84,23 @@ services:
     volumes:
       - ${HOSTED_TEST_STORE_SCRIPT:?set by scripts/hosted-test.sh}:/object-store.py:ro
       - ${HOSTED_TEST_STORE_DIR:?set by scripts/hosted-test.sh}:/store
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.25
+
+  telegram:
+    # A stand-in Telegram Bot API on loopback (scripts/telegram-stub.py): the
+    # Telegram path of a schedule request is tested without Telegram.
+    network_mode: "service:netns"
+    networks: !reset null
+    image: ${BRAIN_IMAGE:-fugal-bot-scripted-brain:test}   # any image with python3
+    entrypoint: ["python3", "-I", "-u", "/telegram-stub.py", "127.0.0.1", "18998"]
+    user: "${HOSTED_TEST_UID:?set by scripts/hosted-test.sh}"
+    depends_on: [netns]
+    volumes:
+      - ${HOSTED_TEST_TELEGRAM_SCRIPT:?set by scripts/hosted-test.sh}:/telegram-stub.py:ro
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

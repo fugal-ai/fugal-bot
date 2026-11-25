@@ -28,6 +28,10 @@
 # live, the news from recorded feed answers), a schedule made with OpenClaw's
 # automations tool and run once, BOOTSTRAP.md retired; a hotkey watch; a chain question
 # that names a dashboard site, answered with taoq instead of the browser.
+# Then Telegram on (a stand-in Bot API, scripts/telegram-stub.py): the
+# allow-listed owner's schedule request arrives the Telegram way and makes the
+# job (OpenClaw's owner list, commands.ownerAllowFrom); another Telegram user
+# is not let in.
 #
 # NOT run here: the "tunnel" service (a Cloudflare named tunnel needs a real
 # token). Its definition is only checked with `docker compose config`.
@@ -262,6 +266,8 @@ BRAIN_TAOQ_ENV=TAOQ_RECORD=/tmp/taoq-record.json TAOQ_FEED_FIXTURE=/tmp/taoq-fee
 HOSTED_TEST_UID=$(id -u):$(id -g)
 HOSTED_TEST_STORE_SCRIPT=$REPO/scripts/object-store.py
 HOSTED_TEST_STORE_DIR=$HT/store
+HOSTED_TEST_TELEGRAM_SCRIPT=$REPO/scripts/telegram-stub.py
+HOSTED_TEST_TELEGRAM_API_ROOT=
 EOF
 )
 
@@ -371,6 +377,10 @@ const c = JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.j
 console.log(JSON.stringify(((c.tools || {}).web || {}).fetch) + " " + JSON.stringify((c.browser || {}).snapshotDefaults));' 2>&1)
 check "page sizes: web_fetch 6,000 characters by default and 12,000 at most, compact browser snapshots ($pages)" \
   test "$pages" = '{"maxChars":6000,"maxCharsCap":12000} {"mode":"efficient"}'
+owners=$(dc exec -T bot node -e '
+const c = JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json", "utf8"));
+console.log(JSON.stringify((c.commands || {}).ownerAllowFrom || null) + " " + JSON.stringify(((c.channels || {}).telegram || {}).apiRoot || null));' 2>&1)
+check "Telegram off: no owner list for any channel (commands.ownerAllowFrom), no Bot API root ($owners)" test "$owners" = "null null"
 
 # ---- sign-in -------------------------------------------------------------------
 step "sign-in: a one-time token posted as a form; no password"
@@ -605,6 +615,65 @@ check "bot and proxy healthy (same image again)" wait_healthy
 START4=$HEALTHY_S
 echo "gateway start: $(doctor_log)"
 check "the next start of the same image skips doctor" bash -c '[[ "$0" == *"already run by this image"*"skipped"* ]]' "$(doctor_log)"
+
+# ---- a schedule asked for on Telegram ----------------------------------------------
+# Telegram on, the way a controller sets it (a bot token and the owner's numeric
+# Telegram user id in TELEGRAM_ALLOWED_USER_IDS), with the Bot API of the
+# "telegram" stub (scripts/telegram-stub.py) in place of api.telegram.org. The
+# message goes the real way: the stub's getUpdates, OpenClaw's Telegram channel,
+# the agent, the automations tool, the reply by sendMessage. Before
+# commands.ownerAllowFrom was set, OpenClaw refused the automations tool here
+# ("needs the owner's authority"): the Telegram allowlist admits a sender but
+# does not make it the owner.
+step "Telegram: the allow-listed owner asks for a schedule (stand-in Bot API); another Telegram user is not let in"
+TG_OWNER=424242; TG_OTHER=555001; TG=http://127.0.0.1:18998
+sed -i -e "s/^TELEGRAM_BOT_TOKEN=.*/TELEGRAM_BOT_TOKEN=123456:hosted-test-not-a-real-token/" \
+  -e "s/^TELEGRAM_ALLOWED_USER_IDS=.*/TELEGRAM_ALLOWED_USER_IDS=$TG_OWNER/" \
+  -e "s|^HOSTED_TEST_TELEGRAM_API_ROOT=.*|HOSTED_TEST_TELEGRAM_API_ROOT=$TG|" "$APP/.env"
+dc up -d --no-build bot 2>&1 | tail -1
+check "bot and proxy healthy with Telegram on" wait_healthy
+tgcfg=$(dc exec -T bot node -e '
+const c = JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json", "utf8"));
+const t = (c.channels || {}).telegram || {};
+console.log(JSON.stringify([(c.commands || {}).ownerAllowFrom, t.dmPolicy, t.allowFrom, t.apiRoot]));' 2>&1)
+check "rendered config: commands.ownerAllowFrom is exactly [\"telegram:$TG_OWNER\"] (that one Telegram user, no other channel), dmPolicy allowlist of that id ($tgcfg)" \
+  test "$tgcfg" = "[[\"telegram:$TG_OWNER\"],\"allowlist\",[\"$TG_OWNER\"],\"$TG\"]"
+tg() { dc exec -T bot curl -s -m 15 "$@"; }
+calls=
+for _ in $(seq 1 60); do calls=$(tg "$TG/test/calls"); [[ "$calls" == *getUpdates* ]] && break; sleep 2; done
+check "the Telegram channel polls the stand-in Bot API ($calls)" bash -c '[[ "$0" == *getMe* && "$0" == *getUpdates* ]]' "$calls"
+ASK_TG="Watch the SN70 champion for me"
+asked() { brain_log | grep -a -c 'SN70 champion'; }
+a0=$(asked)
+tg -X POST --data-binary "$ASK_TG" "$TG/test/message?from=$TG_OTHER" >/dev/null
+sleep 25
+a1=$(asked)
+check "a Telegram user not on the allowlist reaches no model ($((a1 - a0)) calls with the request) and makes no job" \
+  bash -c '[ "$0" = 0 ] && ! grep -q "\"name\":\"Champion watch\"" <<< "$1"' "$((a1 - a0))" "$(fc_job)"
+tg -X POST --data-binary "$ASK_TG" "$TG/test/message?from=$TG_OWNER" >/dev/null
+sent=
+for _ in $(seq 1 90); do
+  sent=$(tg "$TG/test/sent")
+  python3 -I -c 'import json,sys; sys.exit(0 if any(m.get("chat_id") == int(sys.argv[2]) and ("Scheduled" in (m.get("text") or "") or "SCRIPTED-BRAIN" in (m.get("text") or "")) for m in json.loads(sys.argv[1] or "[]")) else 1)' "$sent" "$TG_OWNER" 2>/dev/null && break
+  sleep 2
+done
+tgreply=$(python3 -I -c 'import json,sys; t=[m.get("text") or "" for m in json.loads(sys.argv[1] or "[]") if m.get("chat_id") == int(sys.argv[2])]; print(t[-1] if t else "")' "$sent" "$TG_OWNER" 2>/dev/null)
+echo "reply on Telegram: ${tgreply:0:300}"
+cjob=$(fc_job | grep -a '"name":"Champion watch"' | head -1)
+echo "the job: ${cjob:0:500}"
+check "the owner's request on Telegram made the job with the automations tool: \"Champion watch\", cron 0 */6 * * *, isolated, a script running taoq uids 70 --watch --text" \
+  python3 -I -c '
+import json, sys
+j = json.loads(sys.argv[1]); job = j["job"]; p = job.get("payload", {}); s = job.get("schedule", {})
+ok = (j["enabled"] in (1, True) and s.get("kind") == "cron" and s.get("expr") == "0 */6 * * *"
+      and job.get("sessionTarget") == "isolated" and p.get("kind") == "script" and "taoq uids 70 --watch --text" in p.get("script", ""))
+sys.exit(0 if ok else 1)' "${cjob:-null}"
+check "the reply went back to the owner on Telegram, and it is not a refusal (no \"owner's authority\")" \
+  bash -c '[[ "$0" == *"Scheduled: the SN70 champion watch"* && "$0" != *"authority"* && "$0" != *SCRIPTED-BRAIN* ]]' "$tgreply"
+check "the scripted model was asked once for it, on the owner's message only ($(( $(asked) - a1 )) request lines)" test "$(( $(asked) - a1 ))" -ge 1
+uidsout=$(bot_sh 'cat > /tmp/taoq-uids.json.gz' < bot/tools/fixtures/finney-uids.json.gz; bot_sh 'TAOQ_FIXTURE=/tmp/taoq-uids.json.gz TAOQ_ENDPOINTS=ws://127.0.0.1:9 taoq uids 70 --text --no-save' 2>&1)
+echo "$uidsout" | head -3 | cut -c1-200 | sed 's/^/    /'
+check "taoq uids runs in the image (recorded read): the SN70 leader is named" bash -c '[[ "$0" == "SN70 Fugal"* && "$0" == *"Leader (most incentive"* ]]' "$uidsout"
 
 echo
 echo "== numbers"
